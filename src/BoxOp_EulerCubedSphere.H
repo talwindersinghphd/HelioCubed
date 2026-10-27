@@ -543,6 +543,8 @@ public:
       const State& primitive, const Box& faces, int dir) const;
   inline static void prepareSharedPanelStates(
       const MBLevelBoxData<T,NUMCOMPS,MEM>& primitive);
+  // Bind only for the current patch evaluation; the owning level retains storage.
+  void setSharedPanelStates(const PanelStates* states) const {m_panelStates=states;}
 
   /// Restore the analytic Cartesian background used by magnetized tests.
   inline void addTestProblemBackgroundB(
@@ -914,8 +916,7 @@ private:
     std::vector<T> radial;
   };
   mutable std::array<std::shared_ptr<SecondOrderFaceGeometry>,DIM> m_faceGeometry;
-  // Set only while StageLevel evaluates this patch. Individual AMR patch
-  // operators and the analytic test equilibrium use their existing paths.
+  // Uniform and AMR level drivers bind these only during patch evaluation.
   mutable const PanelStates* m_panelStates = nullptr;
   struct SecondOrderBoundaryGeometry
   {

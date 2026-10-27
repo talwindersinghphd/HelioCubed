@@ -124,6 +124,7 @@ public:
         int preparedChildStage=-1;
         int substeps=1;
         bool timeInterpolated=false;
+        double boundaryInverseWidth=0;
         ScalarLevel volume,jacobian;
         MBInterpOp interp;
         std::unique_ptr<SecondOrderSeamPlan<double,NUMCOMPS>> secondOrderSeam;
@@ -161,7 +162,34 @@ public:
                 flux.push_back(std::make_unique<Array<State,DIM>>());
                 for (int d=0; d<DIM; ++d)
                     (*flux.back())[d].define(layout[index].extrude(d));
+                // New inflow waves are absent from the owned-cell CFL scan.
+                // Cache the three-direction crossing rate on inner-boundary
+                // patches, using the same physical widths as the CFL kernel.
+                if(!fourthOrder() && layout[index].low()[0]==0 &&
+                    std::any_of(ParseInputs::get_CMEs().begin(),ParseInputs::get_CMEs().end(),
+                        [](const auto& source) {return source.injectionMethod==1;}))
+                {
+                    Point high=layout[index].high();high[0]=0;
+                    const Box plane(layout[index].low(),high);
+                    Scalar inverseWidth(plane);
+                    for(auto p : plane) inverseWidth(p)=1/(dr(p,0)*op[index].dx()[0]);
+                    for(int d=1;d<DIM;++d)
+                    {
+                        auto det=CubedSphereShell::detA<double,HOST>(plane,h,d);
+                        auto normal=CubedSphereShell::adjA<double,HOST>(plane,h,layout.block(index),d);
+                        for(auto p : plane)
+                        {
+                            double n2=0;
+                            for(int q=0;q<DIM;++q) n2+=normal(p,q)*normal(p,q);
+                            inverseWidth(p)+=area(p,d)*sqrt(n2)/(volume[index](p)*det(p)*h);
+                        }
+                    }
+                    for(auto p : plane) boundaryInverseWidth=std::max(boundaryInverseWidth,inverseWidth(p));
+                }
             }
+#ifdef PR_MPI
+            MPI_Allreduce(MPI_IN_PLACE,&boundaryInverseWidth,1,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
+#endif
         }
 
         static OP::LevelGeometry makeGeometry(const MBDisjointBoxLayout& layout)
@@ -275,6 +303,7 @@ public:
     void setConvergenceDt(double dt) {m_convergenceDt=dt;}
     double nextCMETime() const
     {return m_cmeSchedule.inserted() ? std::numeric_limits<double>::infinity() : m_cmeSchedule.time();}
+    double cmeRusanovEndTime() const {return m_cmeSchedule.rusanovEndTime();}
     std::pair<int,std::array<double,NUMCOMPS>> sampleProbe(const Array<double,DIM>& position,double time)
     {prepareStates(time);return samplePreparedProbe(position);}
     void writeProbes(int iteration,double time,bool giveSpace);
@@ -372,7 +401,7 @@ public:
     FloorRepairs advance(double dt,double time,bool repairDensity=false)
     {
         PR_TIMERS("HelioCubed::AMR::advance");
-        if(m_effectiveDt.size()!=numLevels()) timestep();
+        if(m_effectiveDt.size()!=numLevels()) timestep(time);
         const int order=ParseInputs::get_temporal_order();
         bool subcycle=false;
         if(ParseInputs::get_amr_subcycling())
@@ -407,16 +436,18 @@ public:
         return repaired;
     }
 
-    double timestep()
+    double timestep(double time)
     {
         double dt=std::numeric_limits<double>::max();
         m_effectiveDt.assign(numLevels(),dt);
+        const double cfl=m_cmeSchedule.cfl(time,ParseInputs::get_CFL(),
+            ParseInputs::get_input_Riemann_solver_type()==2 ? .5 : 1.);
         for(auto* grid : levels())
         {
             OP::GeometryScope geometry(grid->geometry);
             if(fourthOrder())
             {
-                m_effectiveDt[grid->number]=ParseInputs::get_CFL()*OP::dtCFL(grid->state,grid->interp,grid->volume);
+                m_effectiveDt[grid->number]=cfl*OP::dtCFL(grid->state,grid->interp,grid->volume);
                 continue;
             }
             if(!grid->cflScale)
@@ -430,8 +461,13 @@ public:
                         (*grid->cflScale)[index](p)=grid->volume[index](p)*det(p)/grid->jacobian[index](p);
                 }
             }
-            m_effectiveDt[grid->number]=ParseInputs::get_CFL()*OP::dtCFLSecondOrderHost(
+            const double interiorDt=OP::dtCFLSecondOrderHost(
                 grid->state,grid->volume,grid->cflScale.get());
+            double rate=1/interiorDt;
+            if(grid->boundaryInverseWidth>0)
+                rate=CMEModel::boundaryCFLRate(rate,ParseInputs::get_CMEs(),time,
+                    ParseInputs::get_inner_radius(),1/grid->boundaryInverseWidth,ParseInputs::get_gamma());
+            m_effectiveDt[grid->number]=cfl/rate;
         }
         for(unsigned l=numLevels()-1;l>0;--l)
         {
@@ -990,7 +1026,7 @@ private:
         }
         // Earlier AMR versions could not insert a CME. A newly enabled source
         // must therefore still fire when loading one of their checkpoints.
-        else m_cmeSchedule.setInserted(false);
+        else m_cmeSchedule.restore(0,restartTime);
         std::vector<PatchSet> desired(m_ratios.size()+1);
         for(unsigned l=1;l<unsigned(number);++l)
         {
@@ -1240,6 +1276,7 @@ private:
         OP::GeometryScope geometry(level.geometry);
         level.timeInterpolated=false;
         level.preparedState=&state;
+        level.preparedTime=time;
         if (parent)
         {
             // Integrate a tensor quadratic over each fine cell. For offset x
@@ -1366,7 +1403,9 @@ private:
         if(!level.secondOrderSeam || !level.secondOrderSeam->matches(level.primitive,level.donor,level.interp))
             level.secondOrderSeam=std::make_unique<SecondOrderSeamPlan<double,NUMCOMPS>>(
                 level.primitive,level.donor,level.interp);
-        level.secondOrderSeam->apply();
+        const bool boundPrimitives=std::any_of(ParseInputs::get_CMEs().begin(),ParseInputs::get_CMEs().end(),
+            [&](const auto& source) {return time>=source.insertionTime;});
+        level.secondOrderSeam->apply(boundPrimitives);
         for (auto index : level.layout)
             forallInPlace([] PROTO_LAMBDA(Var<double,NUMCOMPS,HOST>& w)
             {w(iRHO)=std::max(w(iRHO),double(RHO00));w(iP)=std::max(w(iP),0.0);},level.primitive[index]);
@@ -1376,6 +1415,8 @@ private:
     void evaluate(GridLevel& level,bool restrictCovered=false)
     {
         PR_TIMERS("HelioCubed::AMR::evaluate");
+        OP::GeometryScope geometry(level.geometry);
+        if(!fourthOrder()) OP::prepareSharedPanelStates(level.primitive);
         // Synchronous stages restrict the fine RHS before any coarse update.
         // Retain all physical/panel and coarse-fine interface faces. Keep the
         // complete operator for magnetic-test equilibrium subtraction.
@@ -1409,6 +1450,9 @@ private:
         for (auto index : level.layout)
         {
             auto& op=level.op[index];
+            op.setTime(level.preparedTime);
+            if(!fourthOrder())
+                op.setSharedPanelStates(&level.geometry.secondOrderPanelStates->adjacent[local]);
             if (ParseInputs::get_Sun_gravity())
             {
                 if(fourthOrder()) op.Gravity_Euler(level.rhs[index],level.primitive[index]);
@@ -1418,6 +1462,7 @@ private:
                 for(int d=0;d<DIM;++d) (*level.flux[local])[d].setVal(0);
             op(level.rhs[index],*level.flux[local],level.primitive[index],1.0,1.0,-1,!fourthOrder(),
                 maskFaces ? level.activeFaces[local].get() : nullptr);
+            op.setSharedPanelStates(nullptr);
             if(fourthOrder() && (ParseInputs::get_linear_viscosity() || ParseInputs::get_nonlinear_viscosity()))
             {
                 Array<State,DIM> viscosity;
@@ -1780,6 +1825,17 @@ inline bool CubedSphereAMR::insertCME(double time)
     PR_TIMERS("HelioCubed::AMR::insertCME");
     while (m_cmeSchedule.due(time)) {
         const auto& source = ParseInputs::get_CMEs()[m_cmeSchedule.index()];
+        if(source.injectionMethod==1)
+        {
+            // Emergence changes only the exterior reservoir. Process its
+            // event and refine the hierarchy without adding a volume source.
+            m_cmeSchedule.markInserted();
+            m_effectiveDt.clear();
+            regrid(time);
+            pout(0)<<"CME"<<source.sourceIndex<<" boundary emergence begins at simulation time "
+                <<std::setprecision(17)<<time<<" s; no volume insertion"<<std::endl;
+            continue;
+        }
         prepareStates(time);
         long long affected = 0;
         for (auto* grid : levels()) for (auto index : grid->layout) {

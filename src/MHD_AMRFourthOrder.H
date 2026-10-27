@@ -7,7 +7,7 @@ inline void CubedSphereAMR::prepareFourthOrder(GridLevel& grid,const Level& stat
 {
     PR_TIMERS("HelioCubed::AMR::prepareFourthOrder");
     OP::GeometryScope geometry(grid.geometry);
-    grid.timeInterpolated=false;grid.preparedState=&state;
+    grid.timeInterpolated=false;grid.preparedState=&state;grid.preparedTime=time;
     amrSetValLocal(grid.donor,0);
     if(parent)
     {

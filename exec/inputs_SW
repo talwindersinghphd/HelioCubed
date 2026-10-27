@@ -71,6 +71,8 @@
 -temporal_order                 2
 # Multiplier of the wave-speed/viscosity timestep estimate.
 # Target CFL. After each CME: 20% for 10 minutes, then ramp back over 30 minutes.
+# Boundary emergence with Roe holds 50% during feeding and for 10 minutes after;
+# it then returns to this input value over 30 minutes.
 -CFL                            1.5
 # Maximum step number; stops when this or max_time is reached.
 -max_iter                       100000
@@ -235,8 +237,8 @@
 # Both use the same GCS/DBM/flux inputs. Type 2 preserves the fitted aspect ratio.
 # Type 2 rejects overlapping sections instead of adjusting the geometry.
 -CME0.CME_type                  1
-# Injection: volume (default) with boundary leg feeding, or experimental boundary emergence.
-# Boundary prescribes the analytic field by superposition; sub-fast inflow is diagnosed.
+# Injection: "volume" (default) with boundary leg feeding, or "boundary" emergence.
+# Boundary emergence requires spatial_order=2 and spatial_operator=1; supports AMR.
 -CME0.CME_injection_method      volume
 # Smoothly fade boundary B, added density and excess velocity to WSA over this
 # many seconds after insertion (default 43200 = 12 hours). 0 disables volume leg feeding.

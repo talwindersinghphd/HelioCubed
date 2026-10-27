@@ -204,6 +204,7 @@ public:
     static int get_seam_pressure_correction() {return getInstance().seam_pressure_correction;}
     static int get_spatial_operator() {return getInstance().spatial_operator;}
     static void set_CME_Rusanov(bool active) {getInstance().cme_rusanov=active;}
+    static int get_input_Riemann_solver_type() {return getInstance().Riemann_solver_type;}
     static int get_Riemann_solver_type() {return getInstance().cme_rusanov ? 1 : getInstance().Riemann_solver_type;}
     static double get_entropy_fix_coeff() {return getInstance().entropy_fix_coeff;}
     static double get_Berta_eta_d() {return getInstance().Berta_eta_d;}
@@ -618,8 +619,8 @@ public:
             if(result.cme.injectionMethod==1) {
                 if(result.cme.boundaryTaperTime==0)
                     throw std::invalid_argument(prefix+"CME_boundary_taper_time must be positive for boundary emergence");
-                if(spatial_order!=2 || amr_max_level!=0)
-                    throw std::invalid_argument("CME boundary emergence currently requires spatial_order=2 and no AMR");
+                if(spatial_order!=2 || spatial_operator!=1)
+                    throw std::invalid_argument("CME boundary emergence requires the standard second-order operator");
                 if(!(result.cme.apex_speed>0 && result.cme.r1+result.cme.r0>inner))
                     throw std::invalid_argument("CME boundary emergence needs positive speed and reference height above the inner boundary");
                 result.cme.insertionTime=CMEModel::boundaryStartTime(result.cme,inner);
@@ -676,7 +677,7 @@ public:
             report<<std::setprecision(17)<<"Native GCS conversion; solar radius 696000 km. Fluxes are positive magnitudes in Mx.\n"
                 <<"Stonyhurst GCS longitude; additive solenoidal CME magnetic field and positive-temperature mass insertion.\n"
                 <<"The CME driver supplies its kinetic/magnetic energy; background thermal energy is not spent on acceleration.\n"
-                <<"Volume velocity is homologous, v=V_apex*r/H; boundary radial speed is max(V_apex*r/H, ambient speed).\n"
+                <<"Volume and emergence velocities are homologous, v=V_apex*r/H; only volume leg feeding retains an ambient-speed lower bound.\n"
                 <<"The source continues the fitted DBM height and speed; B scales as H^-2. This ideal scaling applies to the homologous rope component.\n"
                 <<"O2 inner ghosts feed the expanding rooted rope at every RK stage; boundary emergence starts when its front reaches the inner radius.\n"
                 <<"Each boundary source fades with a smooth quintic from insertion to CME_boundary_taper_time seconds later; expired sources leave only WSA.\n"
@@ -685,7 +686,11 @@ public:
                 <<CMEModel::minimumAlfvenMach<<")^2)).\n"
                 <<"CME_density is the minimum added density; the common built-in Alfven Mach target is "
                 <<CMEModel::minimumAlfvenMach<<". Added mass is reported, not normalized.\n"
-                <<"The boundary driver is experimental: sub-fast inflow requires characteristic treatment.\n"
+                <<"Boundary emergence supports the standard HOST second-order operator on uniform grids and AMR hierarchies.\n"
+                <<"Boundary emergence solves an exterior/interior Riemann problem at inner faces, sharing the interior normal B.\n"
+                <<"Its radial field evolves through the finite-volume induction flux, without prescribing the analytic radial rope field at that face.\n"
+                <<"For input Roe, emergence uses Rusanov and at most half the input CFL while feeding; after feeding and stabilization the input solver and CFL return.\n"
+                <<"The emergence CFL estimate also includes a conservative inflow wave-speed bound before the new boundary field reaches owned cells.\n"
                 <<"This is boundary superposition, not the external-field displacement method; the cell-centered solver uses Powell cleaning, not constrained transport.\n"
                 <<"CME_type 1: normal FRiED sections may be thinned to keep max curvature*radius <= "<<GCS::curvatureMargin<<" at fixed leading height.\n"
                 <<"CME_type 2: GCS circular sections and conical legs with C2 maps in short cone/front transition regions.\n"

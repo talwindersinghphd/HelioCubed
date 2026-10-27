@@ -995,6 +995,7 @@ StageLevel(MBLevelBoxData<T,NUMCOMPS,MEM>& a_k,
       fluxes[2].setToZero();
     }
     unsigned int block = layout.block(dit);
+    eulerOp[dit].setTime(a_time);
     if constexpr (MEM == HOST)
       if(usesSecondOrderPrimitives())
         eulerOp[dit].m_panelStates=&geometry.secondOrderPanelStates->adjacent[panelPatch];

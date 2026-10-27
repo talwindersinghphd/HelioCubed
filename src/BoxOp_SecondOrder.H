@@ -172,6 +172,13 @@ inline void BoxOp_EulerCubedSphere<T,MAP,MEM>::secondOrderOperator(
     }
     const State& w=cartesianPrimitives ? state : converted;
     const auto* panelStates=cartesianPrimitives ? m_panelStates : nullptr;
+    std::vector<CMEParameters> emerging;
+    if (cartesianPrimitives && rhs.box().low()[0]==0)
+        for (const auto& source:ParseInputs::get_CMEs())
+            if (source.injectionMethod==1 && CMEModel::boundaryTaperWeight(source,this->time())>0) {
+                CMEParameters current;
+                if(CMEModel::expandedSource(source,this->time(),current)) emerging.push_back(current);
+            }
     const Box metricBox=rhs.box().grow(1);
     Scalar minusDiv(rhs.box(),T(0));
     Scalar radius,volume;
@@ -272,6 +279,38 @@ inline void BoxOp_EulerCubedSphere<T,MAP,MEM>::secondOrderOperator(
                         for(unsigned c=0;c<NUMCOMPS;++c) l(c)=(*panelLow)(facePoint,c);
                     if(panelHigh && facePoint[dir]==panelHigh->box().low()[dir])
                         for(unsigned c=0;c<NUMCOMPS;++c) r(c)=(*panelHigh)(facePoint,c);
+                    if(dir==0 && i==0 && !emerging.empty()) {
+                        const auto& axes=frame.frame;
+                        const double inner=ParseInputs::get_inner_radius();
+                        const CMEModel::Vector position={inner*axes[0][0],inner*axes[0][1],inner*axes[0][2]};
+                        bool footprint=false;
+                        for(const auto& source:emerging) {
+                            CMEModel::Sample sample;
+                            if(CMEModel::sample(source,position,sample)) {footprint=true;break;}
+                        }
+                        if(footprint) {
+                            // Extrapolate the interior from owned cells only.
+                            // Prescribed ghost values must not supply outgoing waves.
+                            const HelioCubed::StridedFaceState<const T> q{center+2*step,sourceStride};
+                            for(int component=0;component<NUMCOMPS;++component) {
+                                const T a=p(component)-c(component),b=q(component)-p(component);
+                                T slope=T(.5)*(a+b);
+                                if(limiter!=0) slope=a*b<=0 ? T(0) : (a>0 ? min(a,b):max(a,b));
+                                if(limiter==3 && a*b>0) slope=(a>0 ? T(1):T(-1))*
+                                    min(T(.5)*fabs(a+b),T(2)*min(fabs(a),fabs(b)));
+                                r(component)=c(component)-T(.5)*slope;
+                            }
+                            if(!(r(iRHO)>=RHO00 && r(iP)>0))
+                                for(int component=0;component<NUMCOMPS;++component) r(component)=c(component);
+                            // Couple the positive exterior driver to the
+                            // evolved interior through the Riemann solver.
+                            // Share normal B so only the tangential rope field
+                            // is prescribed; normal B evolves through induction.
+                            T normalJump=0;
+                            for(int d=0;d<3;++d) normalJump+=(r(5+d)-l(5+d))*axes[0][d];
+                            for(int d=0;d<3;++d) l(5+d)+=normalJump*axes[0][d];
+                        }
+                    }
                     if (magneticTest) {l(iBX)+=b0;r(iBX)+=b0;}
                     HelioCubed::StridedFaceState<T> out{output+offset,stride};
                     const T area=cache->radial[i-low[0]];

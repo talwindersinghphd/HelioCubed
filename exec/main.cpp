@@ -313,10 +313,13 @@ int main(int argc, char *argv[])
                   << time << " s (decimal year "
                   << source.enterTime << ", method "<<(source.injectionMethod ? "boundary" : "volume")<<")"
                   << setprecision(6) << endl;
-          if (convTestType == 0)
-            pout(0) << "CME CFL reset to " << cmeSchedule.cfl(time, ParseInputs::get_CFL())
-                    << "; input target " << ParseInputs::get_CFL()
-                    << ", ramp starts after 600 s and reaches target after 2400 s" << endl;
+          if (convTestType == 0) {
+            pout(0) << "CME CFL reset to " << cmeSchedule.cfl(time, ParseInputs::get_CFL(),riemannSolver==2 ? .5 : 1.)
+                    << "; input target " << ParseInputs::get_CFL();
+            if(source.injectionMethod==1)
+              pout(0) << "; stabilize throughout boundary feeding and the initial ramp, then recover the input CFL over 1800 s" << endl;
+            else pout(0) << ", ramp starts after 600 s and reaches target after 2400 s" << endl;
+          }
         }
         return true;
       };
@@ -354,6 +357,10 @@ int main(int argc, char *argv[])
     // A final step may be shortened to reach max_time. Preserve the nominal
     // convergence timestep for the next level when running levels in one launch.
     const double convergence_step_dt = dt;
+    const double radialStretch = ParseInputs::get_radial_stretch();
+    const double radialSpan = ParseInputs::get_outer_radius() - ParseInputs::get_inner_radius();
+    const double firstCellWidth = radialSpan * (radialStretch == 0 ? 1./thickness
+        : std::expm1(radialStretch/thickness) / std::expm1(radialStretch));
     
     bool time_exceeded = false;
     for (int iter = restart_step + 1;
@@ -361,11 +368,15 @@ int main(int argc, char *argv[])
     {
       auto start = chrono::steady_clock::now();
       if ((iter % ParseInputs::get_P_floor_cadence()) == 0) OP::P_floor(JU,dVolrLev,iop,layout,time,dt,gamma);
-      const double stepCFL = cmeSchedule.cfl(time, ParseInputs::get_CFL());
+      const double stepCFL = cmeSchedule.cfl(time, ParseInputs::get_CFL(),riemannSolver==2 ? .5 : 1.);
       if (convTestType == 0)
         {
           double dtcfl1 = OP::dtCFL(JU,iop,dVolrLev);
           dt = dtcfl1*stepCFL;
+          const double interiorRate = 1./dtcfl1;
+          const double boundaryRate = CMEModel::boundaryCFLRate(interiorRate,
+              ParseInputs::get_CMEs(),time,ParseInputs::get_inner_radius(),firstCellWidth,gamma);
+          if(boundaryRate > interiorRate) dt = stepCFL/boundaryRate;
         }
       else if (convTestType == 1 || convTestType == 2)
         {
@@ -389,7 +400,7 @@ int main(int argc, char *argv[])
           time_exceeded = true;
         }
       // Keep one solver throughout every RK step, landing exactly on the
-      // end of the ten-minute Rusanov window before restoring the input solver.
+      // end of the CME stabilization window before restoring the input solver.
       const double cmeRusanovEnd = cmeSchedule.rusanovEndTime();
       const bool cmeRusanov = riemannSolver == 2 && time < cmeRusanovEnd;
       bool reachesRusanovEnd = convTestType < 3 && cmeRusanov

@@ -75,6 +75,7 @@ inline void runCubedSphereAMR()
     using OP=CubedSphereAMR::OP;
     const bool fourth=ParseInputs::get_spatial_order()==4;
     const int order=ParseInputs::get_temporal_order(),mode=ParseInputs::get_convTestType();
+    const int riemannSolver=ParseInputs::get_input_Riemann_solver_type();
     const int selected=ParseInputs::get_convergence_level();
     const double prescribed=ParseInputs::get_convergence_dt();
     const bool convergence=mode>=1 && mode<=3,split=selected>=0 && selected<=2;
@@ -153,7 +154,7 @@ inline void runCubedSphereAMR()
         else
         {
             if(convergence && nominal<0) nominal=simulation.convergenceDt()>0
-                ? simulation.convergenceDt() : 0.2*simulation.timestep();
+                ? simulation.convergenceDt() : 0.2*simulation.timestep(time);
             const double fixedDt=convergence ? nominal/(mode==2 && !split ? (1<<run) : 1) : -1;
             simulation.setConvergenceDt(fixedDt);
             const long long maximumSteps=static_cast<long long>(ParseInputs::get_max_iter())
@@ -186,19 +187,33 @@ inline void runCubedSphereAMR()
                         pout(0)<<"AMR density floor at iteration "<<iteration
                             <<": repaired composite cells = "<<repaired.density<<std::endl;
                 }
-                const double cflDt=simulation.timestep();
+                const double cflDt=simulation.timestep(time);
                 dt=std::min(convergence ? fixedDt : cflDt,maximum-time);
+                const double rusanovEnd=simulation.cmeRusanovEndTime();
+                const bool cmeRusanov=riemannSolver==2 && time<rusanovEnd;
+                const bool reachesRusanovEnd=cmeRusanov && rusanovEnd-time<=dt;
+                if(reachesRusanovEnd) dt=rusanovEnd-time;
                 const double event=simulation.nextCMETime();
                 const bool reachesCME=event>time && event-time<=dt;
                 if(reachesCME) dt=event-time;
                 if(!std::isfinite(dt) || !(dt>0) || !(time+dt>time))
                     throw std::runtime_error("Invalid AMR timestep");
+                const int previousSolver=ParseInputs::get_Riemann_solver_type();
+                ParseInputs::set_CME_Rusanov(cmeRusanov);
+                if(ParseInputs::get_Riemann_solver_type()!=previousSolver)
+                {
+                    pout(0)<<"Riemann solver = "<<(cmeRusanov ? "Rusanov (CME insertion window)" : "Roe (input solver restored)")
+                        <<" at time="<<std::setprecision(17)<<time;
+                    if(cmeRusanov) pout(0)<<" s, until="<<rusanovEnd;
+                    pout(0)<<" s"<<std::endl;
+                }
                 const auto repaired=simulation.advance(dt,time,floorDue);
                 if(repaired.changed())
                     pout(0)<<"AMR density repair after iteration "<<iteration
                         <<": density cells = "<<repaired.density<<" pressure cells = "<<repaired.pressure<<std::endl;
                 completed=iteration;
-                time=reachesCME ? event : dt>=maximum-time ? maximum : time+dt;
+                time=reachesCME ? event : reachesRusanovEnd && dt==rusanovEnd-time ? rusanovEnd
+                    : dt>=maximum-time ? maximum : time+dt;
                 const bool inserted=simulation.insertCME(time);
                 const int cadence=ParseInputs::get_amr_regrid_interval();
                 const double nextRegridTimeTrigger=regridTimeCadence>0 ? floor(time/regridTimeCadence) : 0;

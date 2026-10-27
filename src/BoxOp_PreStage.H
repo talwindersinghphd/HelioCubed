@@ -365,11 +365,14 @@ PreStagePatch(BoxData<T,NUMCOMPS,MEM>& a_USphStage,
             radialOld+=old[1+d]*position[d]/radius;radialCME+=cme.velocity[d]*position[d]/radius;
           }
           old[4]=std::max(0.,(a_USphStage(p,iE)-ke-me)*(m_gamma-1));
-          // As in Provornikova et al. (2024), return to the ambient flow
-          // speed when the homologous driver becomes slower than the wind.
+          // Retain the volume driver's ambient-speed lower bound. Emergence
+          // uses its actual homologous speed; the face characteristic boundary
+          // handles waves leaving through a sub-fast patch.
           for(int d=0;d<3;++d)
-            cme.velocity[d]=old[1+d]+std::max(0.,radialCME-radialOld)*position[d]/radius;
-          CMEModel::loadDensity(cme, old, std::max(radialOld,radialCME));
+            cme.velocity[d]=source.injectionMethod==1 ? radialCME*position[d]/radius
+                : old[1+d]+std::max(0.,radialCME-radialOld)*position[d]/radius;
+          CMEModel::loadDensity(cme, old, source.injectionMethod==1
+              ? radialCME : std::max(radialOld,radialCME));
           CMEModel::taperBoundarySource(cme,old,weight);
           const auto delta=CMEModel::increment(old,cme,m_gamma,source.plasmaBeta);
           // Prescribing all primitive variables is justified only for a
@@ -386,7 +389,7 @@ PreStagePatch(BoxData<T,NUMCOMPS,MEM>& a_USphStage,
           const double radialInflow=radialOld+weight*std::max(0.,radialCME-radialOld);
           const double mach=radialInflow/std::sqrt(fast2);
           static std::vector<int> warnedSources;
-          if(!(mach>1) && std::find(warnedSources.begin(),warnedSources.end(),source.sourceIndex)==warnedSources.end()) {
+          if(source.injectionMethod==0 && !(mach>1) && std::find(warnedSources.begin(),warnedSources.end(),source.sourceIndex)==warnedSources.end()) {
             warnedSources.push_back(source.sourceIndex);
             std::cerr<<"CME boundary diagnostic: rank="<<procID()<<", source="<<source.sourceIndex
                 <<", time="<<a_time<<", fast Mach="<<mach<<", density="<<rho/c_MP

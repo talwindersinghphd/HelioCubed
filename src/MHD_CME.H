@@ -1019,6 +1019,30 @@ inline bool expandedSource(const CMEParameters &source, double time, CMEParamete
     return current.geometryScale > 0;
 }
 
+// A new boundary field can be stronger than every owned cell. Include its
+// crossing rate in the CFL estimate before it has entered the grid.
+// Loading gives vA_full <= u/minimumAlfvenMach. With taper weight w, convex
+// mixing bounds vA by vA_ambient + sqrt(w)*vA_full; velocity adds at most w*u.
+// The beta term also bounds the extra sound speed from source heating.
+inline double boundaryCFLRate(double interiorRate, const std::vector<CMEParameters> &sources,
+                              double time, double innerRadius, double crossingWidth,
+                              double gamma) {
+    double rate = interiorRate;
+    for (const auto &source : sources) {
+        const double weight = boundaryTaperWeight(source, time);
+        if (source.injectionMethod != 1 || weight <= 0) continue;
+        CMEParameters current;
+        if (!expandedSource(source, time, current)) continue;
+        const double height = c_SR * (current.r1 + current.r0) * current.geometryScale;
+        const double speed = current.apex_speed * 1e5 * innerRadius / height;
+        const double rootWeight = std::sqrt(weight);
+        const double thermal = std::sqrt(.5 * gamma * source.plasmaBeta);
+        rate = rate * (1 + thermal * rootWeight) + speed / crossingWidth *
+            (weight + rootWeight * (1 + thermal) / minimumAlfvenMach);
+    }
+    return rate;
+}
+
 // Gas pressure after adding source mass at the ambient temperature.
 inline double thermalPressure(const std::array<double, 8> &ambient, const Sample &source,
                               double beta) {
@@ -1061,11 +1085,15 @@ inline std::array<double, 8> increment(const std::array<double, 8> &old, const S
 class CMEInsertionSchedule {
   public:
     CMEInsertionSchedule(bool a_enabled, double a_insertionTime)
-        : m_times(a_enabled ? std::vector<double>{a_insertionTime} : std::vector<double>{}) {}
+        : m_times(a_enabled ? std::vector<double>{a_insertionTime} : std::vector<double>{}),
+          m_boundary(m_times.size(), false), m_feedingEnd(m_times) {}
 
     explicit CMEInsertionSchedule(const std::vector<CMEParameters> &sources) {
-        for (const auto &source : sources)
+        for (const auto &source : sources) {
             m_times.push_back(source.insertionTime);
+            m_boundary.push_back(source.injectionMethod == 1);
+            m_feedingEnd.push_back(source.insertionTime + source.boundaryTaperTime);
+        }
         if (!std::is_sorted(m_times.begin(), m_times.end()))
             throw std::invalid_argument("CME sources must be ordered by insertion time");
     }
@@ -1082,20 +1110,29 @@ class CMEInsertionSchedule {
     int countInserted() const {
         return static_cast<int>(m_next);
     }
-    // Ten physical minutes after the latest insertion. Deriving this from
-    // the saved insertion count also preserves the window across restarts.
+    // A volume insertion is instantaneous. Boundary emergence continues
+    // injecting for its full feeding interval. Stabilize through the end of
+    // that interval and ten more minutes, including overlapping sources.
     double rusanovEndTime() const {
-        return m_next ? m_times[m_next - 1] + 600.0
-                      : -std::numeric_limits<double>::infinity();
+        double end = -std::numeric_limits<double>::infinity();
+        for (size_t i = 0; i < m_next; ++i) end = std::max(end, stabilizationEnd(i));
+        return end;
     }
-    // Use 20% of the input CFL during the insertion window, then recover the
-    // input value linearly over 30 physical minutes. Physical time and the
-    // insertion count determine the ramp, so restarts need no extra state.
-    double cfl(double time, double target) const {
-        if (!m_next)
-            return target;
-        const double progress = std::clamp((time - rusanovEndTime()) / 1800.0, 0.0, 1.0);
-        return target * (0.2 + 0.8 * progress);
+    // Volume: 20% for ten minutes, then return to the input CFL over 30 minutes.
+    // Emergence: ramp to a safe fraction while feeding, then recover the input
+    // value over 30 minutes after stabilization. All limits scale with target.
+    double cfl(double time, double target, double feedingFraction = .5) const {
+        double fraction = 1;
+        for (size_t i = 0; i < m_next; ++i) {
+            const double early = std::clamp((time - m_times[i] - 600) / 1800., 0., 1.);
+            double sourceFraction = .2 + .8 * early;
+            if (m_boundary[i]) {
+                const double recovery = std::clamp((time - stabilizationEnd(i)) / 1800., 0., 1.);
+                sourceFraction = .2 + (feedingFraction - .2) * early + (1 - feedingFraction) * recovery;
+            }
+            fraction = std::min(fraction, sourceFraction);
+        }
+        return target * fraction;
     }
     void markInserted() {
         if (!inserted())
@@ -1115,6 +1152,12 @@ class CMEInsertionSchedule {
                 throw std::invalid_argument("Checkpoint CME count exceeds the configured sources");
             m_next = static_cast<size_t>(count);
         }
+        for (size_t i = 0; i < m_times.size(); ++i)
+            if (m_boundary[i] && m_times[i] < restartTime - 1e-6 &&
+                (count < 0 || i >= m_next))
+                throw std::invalid_argument(
+                    "Checkpoint is after the start of an unrecorded boundary CME; "
+                    "use an earlier solar-wind checkpoint or a matching emergence checkpoint");
     }
     bool due(double a_time) const {
         return !inserted() && a_time >= time();
@@ -1122,5 +1165,11 @@ class CMEInsertionSchedule {
 
   private:
     std::vector<double> m_times;
+    std::vector<bool> m_boundary;
+    std::vector<double> m_feedingEnd;
     size_t m_next = 0;
+    double stabilizationEnd(size_t i) const {
+        return m_boundary[i] ? std::max(m_feedingEnd[i] + 600, m_times[i] + 2400)
+                             : m_times[i] + 600;
+    }
 };
