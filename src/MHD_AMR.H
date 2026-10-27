@@ -6,7 +6,6 @@
 #include "MHD_AMRTagging.H"
 #include "MHD_IO.H"
 #include "MHD_CME.H"
-#include "MHD_CME_Schedule.H"
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -508,7 +507,7 @@ public:
         if (checkpoint && procID()==0)
         {
             std::ofstream file(prefix+".amr");
-            file<<"HelioCubedAMR 4\n"<<iteration<<' '<<std::setprecision(17)<<time<<' '<<dt<<'\n';
+            file<<"HelioCubedAMR 5\n"<<iteration<<' '<<std::setprecision(17)<<time<<' '<<dt<<'\n';
             file<<number<<' '<<m_ratios.size()<<'\n';
             for(int d=0;d<DIM;++d) file<<m_domain.getBlock(0).sizes()[d]<<' ';
             for(int d=0;d<DIM;++d) file<<m_boxSize[d]<<' ';
@@ -518,7 +517,7 @@ public:
             for(auto ratio : m_ratios) file<<ratio[0]<<' '<<ratio[1]<<' '<<ratio[2]<<'\n';
             for(unsigned l=1;l<m_boxSizes.size();++l)
                 file<<m_boxSizes[l][0]<<' '<<m_boxSizes[l][1]<<' '<<m_boxSizes[l][2]<<'\n';
-            file<<int(m_cmeSchedule.inserted())<<'\n';
+            file<<m_cmeSchedule.countInserted()<<'\n';
             for(unsigned l=1;l<numLevels();++l)
             {
                 const auto patches=level(l).layout.patches();
@@ -589,7 +588,7 @@ private:
     Point m_boxSize;
     Point m_regionScale;
     std::string m_outputSuffix;
-    CMEInsertionSchedule m_cmeSchedule{ParseInputs::get_CME_type()==1,ParseInputs::get_CME_insertion_time()};
+    CMEInsertionSchedule m_cmeSchedule{ParseInputs::get_CMEs()};
     double m_convergenceDt=-1;
     std::vector<Point> m_ratios,m_boxSizes,m_cumulative;
     std::vector<MBProblemDomain> m_domains;
@@ -927,7 +926,7 @@ private:
         Point sizes,patchSize;
         double inner,outer,stretch,gamma;int problem;
         if(!(file>>magic>>version>>restartIteration>>restartTime>>restartDt>>number)
-            || magic!="HelioCubedAMR" || (version<1 || version>4)
+            || magic!="HelioCubedAMR" || (version<1 || version>5)
             || number<1 || unsigned(number)>m_ratios.size()+1 || (version==1 && number>2)
             || restartIteration<0 || !std::isfinite(restartTime) || restartTime<0
             || !std::isfinite(restartDt) || restartDt<0)
@@ -983,9 +982,11 @@ private:
         if(version>=3)
         {
             int inserted;file>>inserted;
-            if(!file || (inserted!=0 && inserted!=1))
+            if(!file || inserted<0 || (version<5 && inserted>1))
                 throw std::invalid_argument("Invalid AMR checkpoint CME insertion state");
-            m_cmeSchedule.setInserted(inserted!=0);
+            if(version<5 && ParseInputs::get_CMEs().size()>1)
+                throw std::invalid_argument("Legacy AMR checkpoint has no multiple-CME schedule");
+            m_cmeSchedule.restore(inserted,restartTime);
         }
         // Earlier AMR versions could not insert a CME. A newly enabled source
         // must therefore still fire when loading one of their checkpoints.
@@ -1771,6 +1772,79 @@ inline void runCubedSphereAMR()
 #include "MHD_AMRFourthOrder.H"
 #include "MHD_AMRDiagnostics.H"
 #include "MHD_AMRSlices.H"
-#include "MHD_AMRCME.H"
+namespace HelioCubed
+{
+inline bool CubedSphereAMR::insertCME(double time)
+{
+    if (!m_cmeSchedule.due(time)) return false;
+    PR_TIMERS("HelioCubed::AMR::insertCME");
+    while (m_cmeSchedule.due(time)) {
+        const auto& source = ParseInputs::get_CMEs()[m_cmeSchedule.index()];
+        prepareStates(time);
+        long long affected = 0;
+        for (auto* grid : levels()) for (auto index : grid->layout) {
+            const Box valid = grid->layout[index];
+            const Box box = fourthOrder() ? valid.grow(1) : valid;
+            Scalar radius(box), volume(box);
+            Vector dr(box), area(box);
+            auto& op = grid->op[index];
+            const auto block = grid->layout.block(index);
+            op.radialMetrics(radius, dr, area, volume, box);
+            auto position = forall_p<double,DIM,HOST>(f_cubedSphereMap3,
+                box, radius, op.dx(), 0.5, 0.5, block);
+            State delta(box, 0.0), fourth;
+            if (fourthOrder()) fourth = fourthOrderPrimitives(*grid, index);
+            const auto& primitive = fourthOrder() ? fourth : grid->primitive[index];
+            const double backgroundBx = testProblemBackgroundBx(ParseInputs::get_init_condition_type());
+            for (auto point : box) {
+                CMEModel::Sample cme;
+                if (!CMEModel::sample(source,
+                    {position(point,0),position(point,1),position(point,2)}, cme)) continue;
+                if (valid.containsPoint(point) && !covered(grid->number, point, block)) ++affected;
+                std::array<double,8> ambient{};
+                ambient[0] = primitive(point,iRHO);
+                ambient[4] = primitive(point,iP);
+                for (int d = 0; d < 3; ++d) {
+                    ambient[1+d] = primitive(point,iVX+d);
+                    ambient[5+d] = primitive(point,iBX+d) + (d == 0 ? backgroundBx : 0);
+                }
+                CMEModel::loadDensity(cme, ambient);
+                const auto change = CMEModel::increment(ambient, cme,
+                    ParseInputs::get_gamma(), source.plasmaBeta);
+                for (int component = 0; component < 8; ++component)
+                    delta(point,component) = change[component];
+            }
+            State average;
+            if (fourthOrder())
+                average = (1.0*Shift::Zeros() + (1.0/24)*Stencil<double>::Laplacian())(delta, valid);
+            const auto& jacobian = grid->jacobian[index];
+            for (auto point : valid) for (int component = 0; component < NUMCOMPS; ++component) {
+                double increment = jacobian(point) *
+                    (fourthOrder() ? average(point,component) : delta(point,component));
+                if (fourthOrder()) for (int d = 0; d < DIM; ++d) {
+                    const auto e = Point::Basis(d);
+                    increment += (jacobian(point+e) - jacobian(point-e)) *
+                        (delta(point+e,component) - delta(point-e,component)) / 48;
+                }
+                grid->state[index](point,component) += increment;
+            }
+        }
+        averageDown();
+        for (auto* grid : levels()) if (!OP::validConservedState(grid->state))
+            throw std::runtime_error("Invalid conserved AMR state after CME insertion");
+        m_cmeSchedule.markInserted();
+        m_effectiveDt.clear();
+#ifdef PR_MPI
+        MPI_Allreduce(MPI_IN_PLACE, &affected, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+#endif
+        regrid(time);
+        pout(0) << "CME" << source.sourceIndex << " inserted at simulation time "
+            << std::setprecision(17) << time << " s" << std::endl;
+        pout(0) << "AMR CME affected composite cells = " << affected << std::endl;
+    }
+    return true;
+}
+}
+
 #include "MHD_AMRDriver.H"
 #endif

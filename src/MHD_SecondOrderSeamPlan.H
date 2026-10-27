@@ -2,6 +2,8 @@
 #include "Proto.H"
 #include <vector>
 #include <memory>
+#include <algorithm>
+#include <limits>
 
 namespace HelioCubed
 {
@@ -98,7 +100,7 @@ public:
         }
         return i==m_storage.size();
     }
-    void apply() const
+    void apply(bool boundPrimitives=false) const
     {
         PR_TIMERS("HelioCubed::applySeamPlan");
         for (const auto& run:m_runs)
@@ -118,6 +120,35 @@ public:
                     const T* input=source.data+c*source.stride;
                     for (int r=0;r<run.count;++r) output[r]+=coefficient*input[r];
                 }
+            }
+            if(boundPrimitives) for(int r=0;r<run.count;++r)
+            {
+                // Polynomial seam weights can be negative. With a sharp CME
+                // density contrast, clipping a negative interpolated density
+                // to a tiny floor creates an enormous ghost-cell Alfven speed.
+                // Use a convex interpolation of the complete primitive state
+                // when rho or p leaves its donor bounds, instead of inventing
+                // a near-vacuum ghost. Owned conserved cells are never changed.
+                T rhoMin=std::numeric_limits<T>::infinity(),rhoMax=0;
+                T pMin=std::numeric_limits<T>::infinity(),pMax=0;
+                for(size_t s=0;s<run.coefficients->size();++s) {
+                    const auto& source=m_sources[run.first+s];
+                    const T rho=source.data[r],p=source.data[r+4*source.stride];
+                    rhoMin=std::min(rhoMin,rho);rhoMax=std::max(rhoMax,rho);
+                    pMin=std::min(pMin,p);pMax=std::max(pMax,p);
+                }
+                const T rho=run.data[r],p=run.data[r+4*run.stride];
+                if(rho>=rhoMin && rho<=rhoMax && p>=pMin && p<=pMax) continue;
+                T weight=0;
+                for(unsigned c=0;c<C;++c) run.data[r+c*run.stride]=0;
+                for(size_t s=0;s<run.coefficients->size();++s) {
+                    const T coefficient=std::max(0.,(*run.coefficients)[s]);
+                    const auto& source=m_sources[run.first+s];weight+=coefficient;
+                    for(unsigned c=0;c<C;++c)
+                        run.data[r+c*run.stride]+=coefficient*source.data[r+c*source.stride];
+                }
+                PROTO_ASSERT(weight>0,"Seam interpolation needs a positive donor weight");
+                for(unsigned c=0;c<C;++c) run.data[r+c*run.stride]/=weight;
             }
         }
     }

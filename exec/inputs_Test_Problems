@@ -199,10 +199,7 @@
 # Number of trajectory probes; 0 disables probes (up to 32 named entries).
 -num_probes                     0
 
-# === CME insertion ===
+# === GCS CMEs ===
 
-# When CME_type=1, schedule one insertion relative to BC_start_time.
-# Checkpoints retain insertion state to prevent duplicate CMEs on restart.
-
-# CME insertion: 0=off, 1=insert the scheduled flux rope.
--CME_type                       0
+# No CME for analytic test problems.
+-num_CMEs                       0

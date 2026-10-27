@@ -99,20 +99,6 @@ inline void runCubedSphereAMR()
         throw std::invalid_argument("AMR slice cadences must be finite and positive");
     if(ParseInputs::get_output_divB()!=0 && ParseInputs::get_output_divB()!=1)
         throw std::invalid_argument("output_divB must be 0 or 1");
-    if(ParseInputs::get_CME_type()==1)
-    {
-        for(double value : {ParseInputs::get_CME_r1(),ParseInputs::get_CME_r0(),
-            ParseInputs::get_CME_halfangle(),ParseInputs::get_CME_FRiED_n(),
-            ParseInputs::get_CME_pol_flux_control(),ParseInputs::get_CME_density(),
-            ParseInputs::get_CME_lat(),ParseInputs::get_CME_lon(),ParseInputs::get_CME_tilt(),
-            ParseInputs::get_CME_apex_speed(),ParseInputs::get_CME_a1(),
-            ParseInputs::get_CME_helicity_sign(),ParseInputs::get_CME_shift()})
-            if(!std::isfinite(value)) throw std::invalid_argument("AMR CME parameters must be finite");
-        if(ParseInputs::get_CME_r1()<=0 || ParseInputs::get_CME_r0()<=0
-            || ParseInputs::get_CME_halfangle()<=0 || ParseInputs::get_CME_FRiED_n()<=0
-            || ParseInputs::get_CME_density()<=0 || ParseInputs::get_CME_pol_flux_control()==0)
-            throw std::invalid_argument("AMR CME requires positive CME_r1/r0/halfangle/FRiED_n/density and nonzero CME_pol_flux_control");
-    }
     if(ParseInputs::get_write_cadence()<=0 || ParseInputs::get_checkpoint_cadence()<=0
         || !std::isfinite(ParseInputs::get_write_time_cadence()) || ParseInputs::get_write_time_cadence()<=0
         || !std::isfinite(ParseInputs::get_CFL()) || ParseInputs::get_CFL()<=0

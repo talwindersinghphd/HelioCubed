@@ -61,7 +61,10 @@ inline void BoxOp_EulerCubedSphere<T,MAP,MEM>::prepareSecondOrderPrimitives(
         if (!cache->seam || !cache->seam->matches(state,cache->input,interp))
             cache->seam=std::make_unique<HelioCubed::SecondOrderSeamPlan<T,NUMCOMPS>>(
                 state,cache->input,interp);
-        cache->seam->apply();
+        bool boundPrimitives=false;
+        for(const auto& source:ParseInputs::get_CMEs())
+            if(time>=source.insertionTime) boundPrimitives=true;
+        cache->seam->apply(boundPrimitives);
     }
     else interp.apply(state,cache->input);
     for (auto index : layout)

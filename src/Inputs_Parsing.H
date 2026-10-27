@@ -16,6 +16,7 @@
 #include "MHD_Constants.H"
 #include "MHD_Time.H"
 #include "MHD_AMRTagging.H"
+#include "MHD_CME.H"
 
 #ifndef GIT_HASH_RAW
 #define GIT_HASH_RAW unknown_hash
@@ -74,6 +75,7 @@ private:
     int spatial_order = 4; // 2: common PLM operator, 4: standard/Berta operator
     int spatial_operator = 1; // 1: Existing Euler operator, 2: Berta WENOZ operator
     int Riemann_solver_type = 1; // 1: Rusanov, 2: Roe 8-wave (standard and Berta)
+    bool cme_rusanov = false; // Temporary solver override after a CME insertion.
     double entropy_fix_coeff = 0.3; // FullSphere entropy-fix coefficient; 0 disables it
     double Berta_eta_d = 0.02; // Berta detector threshold
     int Berta_detector_type = 0; // 0: Jameson detector, 1: Berta derivative-ratio detector
@@ -163,26 +165,10 @@ private:
     int BC_frame_rotate = 0; // 0: Frames don't rotate (SWiG), 1: Frames rotate
     int BC_force_single_frame = 0; // 1: Use only one frame for BCs, 0: Use all frames for BCs (if present)
     int Sun_gravity = 0; // 0: No gravity, 1: Include Sun's gravity as source term
-    int CME_type = 0; // 0: No CME, 1: CME
-    double CME_Enter_Time = 0.0; // Decimal year; 0 inserts at simulation start.
-    string CME_Enter_Time_raw = "0";
-    double CME_insertion_time = 0.0; // Seconds after BC_start_time.
-    double CME_r1;
-    double CME_r0;
-    double CME_halfangle;
-    double CME_pol_flux_control;
-    double CME_FRiED_n;
-    double CME_lat;
-    double CME_lon;
-    double CME_tilt;
-    double CME_Vandas_R0;
-    double CME_apex_speed;
-    double CME_energy_control;
-    double CME_density;
-    double CME_helicity_sign;
-    double CME_a1;
-    double CME_shift;
-    
+    int CME_type = 0; // Derived from the GCS source count.
+    int num_CMEs = 0;
+    std::vector<CMEParameters> CMEs; // Stable chronological order.
+
     // Private Constructor
     ParseInputs() {}
 
@@ -217,7 +203,8 @@ public:
     static int get_BC_conserved_averages() {return getInstance().BC_conserved_averages;}
     static int get_seam_pressure_correction() {return getInstance().seam_pressure_correction;}
     static int get_spatial_operator() {return getInstance().spatial_operator;}
-    static int get_Riemann_solver_type() {return getInstance().Riemann_solver_type;}
+    static void set_CME_Rusanov(bool active) {getInstance().cme_rusanov=active;}
+    static int get_Riemann_solver_type() {return getInstance().cme_rusanov ? 1 : getInstance().Riemann_solver_type;}
     static double get_entropy_fix_coeff() {return getInstance().entropy_fix_coeff;}
     static double get_Berta_eta_d() {return getInstance().Berta_eta_d;}
     static int get_Berta_detector_type() {return getInstance().Berta_detector_type;}
@@ -301,24 +288,7 @@ public:
     static int get_BC_force_single_frame() {return getInstance().BC_force_single_frame;}
     static int get_Sun_gravity() {return getInstance().Sun_gravity;}
     static int get_CME_type() {return getInstance().CME_type;}
-    static double get_CME_Enter_Time() {return getInstance().CME_Enter_Time;}
-    static double get_CME_insertion_time() {return getInstance().CME_insertion_time;}
-    static double get_CME_r1() {return getInstance().CME_r1;}
-    static double get_CME_r0() {return getInstance().CME_r0;}
-    static double get_CME_halfangle() {return getInstance().CME_halfangle;}
-    static double get_CME_pol_flux_control() {return getInstance().CME_pol_flux_control;}
-    static double get_CME_FRiED_n() {return getInstance().CME_FRiED_n;}
-    static double get_CME_lat() {return getInstance().CME_lat;}
-    static double get_CME_lon() {return getInstance().CME_lon;}
-    static double get_CME_tilt() {return getInstance().CME_tilt;}
-    static double get_CME_Vandas_R0() {return getInstance().CME_Vandas_R0;}
-    static double get_CME_apex_speed() {return getInstance().CME_apex_speed;}
-    static double get_CME_energy_control() {return getInstance().CME_energy_control;}
-    static double get_CME_density() {return getInstance().CME_density;}
-    static double get_CME_helicity_sign() {return getInstance().CME_helicity_sign;}
-    static double get_CME_a1() {return getInstance().CME_a1;}
-    static double get_CME_shift() {return getInstance().CME_shift;}
-
+    static const std::vector<CMEParameters>& get_CMEs() {return getInstance().CMEs;}
     // Parses now with command-line arguments
     void parsenow(int argc, char* argv[]) {
         InputArgs args;
@@ -450,23 +420,38 @@ public:
         args.add("BC_frame_rotate", BC_frame_rotate);
         args.add("BC_force_single_frame", BC_force_single_frame);
         args.add("Sun_gravity", Sun_gravity);
-        args.add("CME_Enter_Time", CME_Enter_Time_raw);
-        args.add("CME_type", CME_type);
-        args.add("CME_r1", CME_r1);
-        args.add("CME_r0", CME_r0);
-        args.add("CME_halfangle", CME_halfangle);
-        args.add("CME_pol_flux_control", CME_pol_flux_control);
-        args.add("CME_FRiED_n", CME_FRiED_n);
-        args.add("CME_lat", CME_lat);
-        args.add("CME_lon", CME_lon);
-        args.add("CME_tilt", CME_tilt);
-        args.add("CME_Vandas_R0", CME_Vandas_R0);
-        args.add("CME_apex_speed", CME_apex_speed);
-        args.add("CME_energy_control", CME_energy_control);
-        args.add("CME_density", CME_density);
-        args.add("CME_helicity_sign", CME_helicity_sign);
-        args.add("CME_a1", CME_a1);
-        args.add("CME_shift", CME_shift);
+        args.add("num_CMEs", num_CMEs);
+        // Discover indexed options before InputArgs parses them. Keep their
+        // values as strings: InputArgs otherwise rounds doubles through float.
+        std::map<int,std::map<string,string>> sourceInputs;
+        std::vector<std::pair<int,GCS::Result>> gcsResults;
+        auto registerSource = [&](const string& option) {
+            if (option.compare(0,4,"-CME") != 0) return;
+            const size_t dot = option.find('.',4);
+            if (dot == string::npos)
+                throw std::invalid_argument("CME inputs now use -num_CMEs and indexed GCS fields; unsupported option: " + option);
+            const string number = option.substr(4,dot-4);
+            if (number.empty() || !std::all_of(number.begin(),number.end(),[](char c){return c >= '0' && c <= '9';}))
+                throw std::invalid_argument("Invalid indexed CME option: " + option);
+            const int index = std::stoi(number);
+            const string field = option.substr(dot+1);
+            static const std::vector<string> fields = {"CME_type","GCS_speed","GCS_fit_height","GCS_fit_time",
+                "GCS_latitude","GCS_longitude","GCS_tilt","GCS_half_angle","GCS_aspect_ratio",
+                "DBM_gamma","DBM_wind_speed","DBM_target_height","CME_poloidal_flux","CME_toroidal_flux",
+                "CME_leading_polarity","CME_helicity_sign","CME_density","GCS_earth_trajectory",
+                "CME_injection_method","CME_plasma_beta","CME_boundary_taper_time"};
+            if (std::find(fields.begin(),fields.end(),field) == fields.end())
+                throw std::invalid_argument("Unknown indexed CME field: " + option);
+            args.add(option.substr(1),sourceInputs[index][field]);
+        };
+        if (argc == 2) {
+            std::ifstream file(argv[1]);
+            string line, option;
+            while (std::getline(file,line)) {
+                std::istringstream row(line);
+                if (row >> option) registerSource(option);
+            }
+        } else for (int i=1; i<argc; ++i) registerSource(argv[i]);
         args.parse(argc, argv);
         auto requireGeometry = [](const string& raw, const char* name) {
             if (raw.empty()) {
@@ -570,18 +555,174 @@ public:
             || amr_refine_B_maxlevel < -1 || amr_refine_V_maxlevel < -1)
             throw std::invalid_argument("AMR variable maxlevels must be -1 (hierarchy maximum) or nonnegative.");
         BC_start_epoch = parseCalendarEpoch(BC_start_time_raw, "BC_start_time");
-        CalendarEpoch cmeEpoch = parseCalendarEpoch(CME_Enter_Time_raw, "CME_Enter_Time");
         BC_start_time = BC_start_epoch.decimalYear();
-        CME_Enter_Time = cmeEpoch.decimalYear();
-        if (CME_type != 0 && CME_type != 1) {
-            throw std::invalid_argument("CME_type must be 0 or 1.");
+        CMEs.clear();
+        if (num_CMEs < 0) throw std::invalid_argument("num_CMEs must be nonnegative");
+        for (const auto& entry : sourceInputs)
+            if (entry.first >= num_CMEs) throw std::invalid_argument("Indexed CME exceeds num_CMEs");
+        for (int i=0; i<num_CMEs; ++i) {
+            const string prefix="CME"+std::to_string(i)+".";
+            const auto entry=sourceInputs.find(i);
+            if (entry==sourceInputs.end()) throw std::invalid_argument("Missing inputs for "+prefix);
+            const auto& raw=entry->second;
+            auto value=[&](const char* name,double fallback,bool required=false) {
+                auto field=raw.find(name);
+                if (field==raw.end() || field->second.empty()) {
+                    if (required) throw std::invalid_argument("Missing "+prefix+name);
+                    return fallback;
+                }
+                const double result=parsePreciseValue(field->second,(prefix+name).c_str(),fallback);
+                if (!std::isfinite(result)) throw std::invalid_argument(prefix+name+" must be finite");
+                return result;
+            };
+            auto textValue=[&](const char* key,const string& fallback) {
+                auto it=raw.find(key);return it==raw.end() || it->second.empty() ? fallback : it->second;
+            };
+            const double type=value("CME_type",1);
+            if(type!=0 && type!=1 && type!=2)
+                throw std::invalid_argument(prefix+"CME_type must be 0 (disabled), 1 (FRiED), or 2 (GCS)");
+            if(type==0) continue;
+            if(BC_start_epoch.year==0) throw std::invalid_argument("GCS conversion requires BC_start_time");
+            GCS::Input input;
+            input.cmeType=static_cast<int>(type);
+            input.speed=value("GCS_speed",0,true);input.fitHeight=value("GCS_fit_height",0,true);
+            const string fitTime=textValue("GCS_fit_time","");
+            if(fitTime.empty()) throw std::invalid_argument("Missing "+prefix+"GCS_fit_time");
+            input.fitTime=GCS::parseFitTime(fitTime);
+            input.latitude=value("GCS_latitude",0,true);input.longitude=value("GCS_longitude",0,true);
+            input.tilt=value("GCS_tilt",0,true);input.halfAngle=value("GCS_half_angle",0,true);
+            input.aspectRatio=value("GCS_aspect_ratio",0,true);
+            input.gamma=value("DBM_gamma",1e-8);input.wind=value("DBM_wind_speed",450);
+            input.targetHeight=value("DBM_target_height",70);
+            input.poloidalFlux=value("CME_poloidal_flux",std::numeric_limits<double>::quiet_NaN());
+            input.toroidalFlux=value("CME_toroidal_flux",std::numeric_limits<double>::quiet_NaN());
+            const double polarity=value("CME_leading_polarity",1),helicity=value("CME_helicity_sign",1);
+            if((polarity!=1 && polarity!=-1) || (helicity!=1 && helicity!=-1))
+                throw std::invalid_argument("CME leading polarity and helicity must be +1 or -1");
+            input.leadingPolarity=static_cast<int>(polarity);input.helicity=static_cast<int>(helicity);
+            input.earthTrajectory=textValue("GCS_earth_trajectory","trajEarth.dat");
+            const double inner=parsePreciseValue(inner_radius,"inner_radius",0.0)/c_SR;
+            auto result=GCS::convert(input,BC_start_epoch,inner);
+            result.cme.sourceIndex=i;
+            result.cme.density=value("CME_density",2.77e-24);
+            result.cme.plasmaBeta=value("CME_plasma_beta",0);
+            if(result.cme.plasmaBeta<0) throw std::invalid_argument(prefix+"CME_plasma_beta must be nonnegative");
+            result.cme.boundaryTaperTime=value("CME_boundary_taper_time",43200);
+            if(result.cme.boundaryTaperTime<0)
+                throw std::invalid_argument(prefix+"CME_boundary_taper_time must be nonnegative seconds");
+            const string method=textValue("CME_injection_method","volume");
+            if(method!="volume" && method!="boundary")
+                throw std::invalid_argument(prefix+"CME_injection_method must be volume or boundary");
+            result.cme.injectionMethod=method=="boundary";
+            result.cme.referenceTime=result.cme.insertionTime;
+            if(result.cme.injectionMethod==1) {
+                if(result.cme.boundaryTaperTime==0)
+                    throw std::invalid_argument(prefix+"CME_boundary_taper_time must be positive for boundary emergence");
+                if(spatial_order!=2 || amr_max_level!=0)
+                    throw std::invalid_argument("CME boundary emergence currently requires spatial_order=2 and no AMR");
+                if(!(result.cme.apex_speed>0 && result.cme.r1+result.cme.r0>inner))
+                    throw std::invalid_argument("CME boundary emergence needs positive speed and reference height above the inner boundary");
+                result.cme.insertionTime=CMEModel::boundaryStartTime(result.cme,inner);
+                if(result.cme.insertionTime<0)
+                    throw std::invalid_argument("Boundary CME begins before BC_start_time; use an earlier background epoch");
+                result.cme.enterTime=advanceCalendarEpoch(BC_start_epoch,result.cme.insertionTime).decimalYear();
+            }
+            CMEs.push_back(result.cme);gcsResults.push_back({i,result});
         }
-        if (CME_type == 1 && CME_Enter_Time > 0.0 && BC_start_time == 0.0) {
-            throw std::invalid_argument(
-                "A scheduled CME requires BC_start_time to define the simulation's calendar epoch.");
+        CME_type=CMEs.empty() ? 0 : 1;
+        for (auto& c : CMEs) {
+            for (double v : {c.r1,c.r0,c.halfangle,c.pol_flux_control,c.FRiED_n,c.lat,c.lon,c.tilt,
+                c.apex_speed,c.density,c.helicity_sign,c.a1})
+                if (!std::isfinite(v)) throw std::invalid_argument("CME parameters must be finite");
+            if (c.r1<=0 || c.r0<=0 || c.halfangle<=0 || c.halfangle>=180
+                || (c.fieldModel==1 && c.FRiED_n<=0)
+                || c.pol_flux_control==0 || c.density<=0 || c.apex_speed<0
+                || (c.helicity_sign!=1 && c.helicity_sign!=-1))
+                throw std::invalid_argument("Invalid CME geometry, density, speed, twist, or helicity");
+            if (c.fieldModel==1) c.normalAxis.prepare(c.r1,c.r0,c.halfangle,c.FRiED_n);
         }
-        CME_insertion_time = CME_type == 1 && cmeEpoch.year != 0
-            ? secondsBetweenEpochs(BC_start_epoch, cmeEpoch) : 0.0;
+        std::stable_sort(CMEs.begin(),CMEs.end(),[](const CMEParameters& a,const CMEParameters& b) {
+            return a.insertionTime < b.insertionTime;
+        });
+        for (const auto& c : CMEs) {
+            pout(0)<<"Scheduled CME"<<c.sourceIndex<<" at "<<std::setprecision(17)
+                <<c.insertionTime<<" s (decimal year "<<c.enterTime<<", CME_type "<<c.fieldModel;
+            if(c.fieldModel==2) pout(0)<<", GCS aspect ratio "<<c.gcsTube.aspectRatio
+                <<", minimum section metric "<<c.gcsTube.minimumMetric
+                <<", smooth join half-width "<<c.gcsTube.joinHalfWidth<<" Rsun";
+            else pout(0)<<", max curvature*radius "<<c.normalAxis.maxCurvatureRadius;
+            pout(0)<<", "<<(c.injectionMethod ? "boundary emergence" : "volume insertion with boundary leg feeding")
+                <<")"<<std::setprecision(6)<<endl;
+        }
+        if(!gcsResults.empty() && procID()==0) {
+            std::ofstream resolved("CME_resolved.inputs"),report("CME_conversion_report.txt");
+            if(!resolved || !report) throw std::runtime_error("Cannot write resolved GCS parameter files");
+            resolved<<std::setprecision(17)<<"# Resolved GCS CME block; retain the background inputs from the original run file.\n-num_CMEs "<<num_CMEs<<"\n";
+            for(int index=0;index<num_CMEs;++index) {
+                const string p="-CME"+std::to_string(index)+".";
+                const auto item=std::find_if(gcsResults.begin(),gcsResults.end(),
+                    [&](const auto& value){return value.first==index;});
+                if(item==gcsResults.end()) {resolved<<p<<"CME_type 0\n";continue;}
+                resolved<<p<<"CME_type "<<item->second.cme.fieldModel<<"\n";
+                for(const auto& field : sourceInputs.at(index))
+                    if(field.first!="CME_type" && field.first!="CME_poloidal_flux" && field.first!="CME_toroidal_flux"
+                        && field.first!="CME_injection_method" && field.first!="CME_boundary_taper_time")
+                        resolved<<p<<field.first<<" "<<field.second<<"\n";
+                resolved<<p<<"CME_injection_method "<<(item->second.cme.injectionMethod ? "boundary" : "volume")<<"\n";
+                resolved<<p<<"CME_boundary_taper_time "<<item->second.cme.boundaryTaperTime<<"\n";
+                resolved<<p<<"CME_poloidal_flux "<<item->second.poloidalFlux<<"\n"
+                    <<p<<"CME_toroidal_flux "<<item->second.toroidalFlux<<"\n";
+            }
+            report<<std::setprecision(17)<<"Native GCS conversion; solar radius 696000 km. Fluxes are positive magnitudes in Mx.\n"
+                <<"Stonyhurst GCS longitude; additive solenoidal CME magnetic field and positive-temperature mass insertion.\n"
+                <<"The CME driver supplies its kinetic/magnetic energy; background thermal energy is not spent on acceleration.\n"
+                <<"Volume velocity is homologous, v=V_apex*r/H; boundary radial speed is max(V_apex*r/H, ambient speed).\n"
+                <<"The source continues the fitted DBM height and speed; B scales as H^-2. This ideal scaling applies to the homologous rope component.\n"
+                <<"O2 inner ghosts feed the expanding rooted rope at every RK stage; boundary emergence starts when its front reaches the inner radius.\n"
+                <<"Each boundary source fades with a smooth quintic from insertion to CME_boundary_taper_time seconds later; expired sources leave only WSA.\n"
+                <<"The taper scales added B, loaded density and excess velocity; thermal and total energy are rebuilt consistently. Volume insertion is unchanged.\n"
+                <<"Density loading is automatic for every CME: rho_total=max(rho_bg+CME_density, B_total^2/(4*pi*(u_radial/"
+                <<CMEModel::minimumAlfvenMach<<")^2)).\n"
+                <<"CME_density is the minimum added density; the common built-in Alfven Mach target is "
+                <<CMEModel::minimumAlfvenMach<<". Added mass is reported, not normalized.\n"
+                <<"The boundary driver is experimental: sub-fast inflow requires characteristic treatment.\n"
+                <<"This is boundary superposition, not the external-field displacement method; the cell-centered solver uses Powell cleaning, not constrained transport.\n"
+                <<"CME_type 1: normal FRiED sections may be thinned to keep max curvature*radius <= "<<GCS::curvatureMargin<<" at fixed leading height.\n"
+                <<"CME_type 2: GCS circular sections and conical legs with C2 maps in short cone/front transition regions.\n"
+                <<"Supplied GCS aspect ratio, half angle, apex and geometry outside those transitions are retained.\n"
+                <<"Both fields conserve analytic axial flux and have constant dtheta/d(axis arclength); no force-free equilibrium is assumed.\n"
+                <<"For GCS, theta is the azimuth in the smoothly joined circular section planes.\n"
+                <<"GCS join smoothing acts on the section maps, preserving flux and constant turn without internal tangential B jumps.\n"
+                <<"Domain poloidal flux means the mean of inner/outer unsigned plane fluxes above the inner radius.\n"
+                <<"Cutting the rope at the inner boundary can leave these two plane contributions unequal.\n"
+                <<"Empirical defaults match create_input_files_v3.py: Sindhuja & Gopalswamy 2020, v=438.9*(Phi_p/1e21)^0.34 km/s before DBM.\n"
+                <<"Toroidal estimate: Qiu2007, Phi_t=0.32e21*(Phi_p/1e21)^1.20, assuming Phi_p~=Phi_RC.\n"
+                <<"References: https://doi.org/10.3847/1538-4357/ab620f ; https://solar.physics.montana.edu/qiuj/publication/apj_flux.pdf\n";
+            for(const auto& item : gcsResults) {
+                const auto& r=item.second;const auto& c=r.cme;
+                report<<"\nCME"<<item.first<<": reference-height epoch "<<formatUTCEpoch(r.epoch)<<", transit "<<r.transitSeconds<<" s\n"
+                    <<"injection method "<<(c.injectionMethod ? "boundary" : "volume")<<"; start time "<<c.insertionTime
+                    <<" s; reference time "<<c.referenceTime<<" s; added plasma beta "<<c.plasmaBeta<<"\n"
+                    <<"boundary taper duration "<<c.boundaryTaperTime<<" s; WSA-only after simulation time "
+                    <<c.insertionTime+c.boundaryTaperTime<<" s\n"
+                    <<"automatic density loading; minimum added density "<<c.density<<" g/cm^3\n"
+                    <<"CME_type "<<c.fieldModel<<"; speed "<<c.apex_speed<<" km/s; half angle "<<c.halfangle
+                    <<" deg; Rt "<<c.r1<<" Rsun; Rp "<<c.r0<<" Rsun\n"
+                    <<"original aspect ratio "<<r.originalAspectRatio<<"; actual apex ratio Rp/Rt "<<c.r0/c.r1<<"\n";
+                if(c.fieldModel==2) report<<"GCS with smooth joins; minimum section metric "<<c.gcsTube.minimumMetric
+                    <<"; conical leg join length "<<c.gcsTube.joinLength<<" Rsun"
+                    <<"; transition half-width "<<c.gcsTube.joinHalfWidth<<" Rsun\n";
+                else report<<"FRiED n "<<c.FRiED_n<<"; original max curvature*radius "<<r.originalMaxCurvatureRadius
+                    <<"; adjusted max "<<c.normalAxis.maxCurvatureRadius<<"\n";
+                report<<"Phi_p "<<r.poloidalFlux<<(r.estimatedPoloidal ? " estimated from GCS speed" : " supplied")<<"\n"
+                    <<"Phi_t "<<r.toroidalFlux<<(r.estimatedToroidal ? " estimated using Qiu2007 from poloidal flux" : " supplied")<<"\n"
+                    <<"full-rope Phi_p "<<r.fullPoloidalFlux
+                    <<"; domain inner "<<r.domainInnerFlux<<"; domain outer "<<r.domainOuterFlux<<"\n"
+                    <<"simulation longitude "<<c.lon<<" deg; tilt "<<c.tilt<<" deg\n"
+                    <<"a1 "<<c.a1<<" G; pol multiplier "<<c.pol_flux_control<<" per AU\n";
+            }
+            pout(0)<<"GCS inputs converted; wrote CME_resolved.inputs and CME_conversion_report.txt"<<endl;
+        }
         geometry.r0 = parsePreciseValue(inner_radius, "inner_radius", 0.0);
         geometry.r1 = parsePreciseValue(outer_radius, "outer_radius", 0.0);
         geometry.radialStretch = parsePreciseValue(radial_stretch, "radial_stretch", 0.0);
@@ -716,23 +857,7 @@ public:
         pout(0) << "BC_frame_rotate: " << BC_frame_rotate << endl;
         pout(0) << "BC_force_single_frame: " << BC_force_single_frame << endl;
         pout(0) << "Sun_gravity: " << Sun_gravity << endl;
-        pout(0) << "CME_type: " << CME_type << endl;
-        pout(0) << "CME_Enter_Time: " << CME_Enter_Time_raw << endl;
-        pout(0) << "CME_r1: " << CME_r1 << endl;
-        pout(0) << "CME_r0: " << CME_r0 << endl;
-        pout(0) << "CME_halfangle: " << CME_halfangle << endl;
-        pout(0) << "CME_pol_flux_control: " << CME_pol_flux_control << endl;
-        pout(0) << "CME_FRiED_n: " << CME_FRiED_n << endl;
-        pout(0) << "CME_lat: " << CME_lat << endl;
-        pout(0) << "CME_lon: " << CME_lon << endl;
-        pout(0) << "CME_tilt: " << CME_tilt << endl;
-        pout(0) << "CME_Vandas_R0: " << CME_Vandas_R0 << endl;
-        pout(0) << "CME_apex_speed: " << CME_apex_speed << endl;
-        pout(0) << "CME_energy_control: " << CME_energy_control << endl;
-        pout(0) << "CME_density: " << CME_density << endl;
-        pout(0) << "CME_helicity_sign: " << CME_helicity_sign << endl;
-        pout(0) << "CME_a1: " << CME_a1 << endl;
-        pout(0) << "CME_shift: " << CME_shift << endl;
+        pout(0) << "num_CMEs: " << num_CMEs << endl;
         pout(0) << setw(75) << setfill('-') << "-" << endl;
                 
     }

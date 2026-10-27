@@ -70,6 +70,7 @@
 # Time integrator: 1=Euler, 2=SSPRK2, 3=classical RK3, 4=classical RK4.
 -temporal_order                 2
 # Multiplier of the wave-speed/viscosity timestep estimate.
+# Target CFL. After each CME: 20% for 10 minutes, then ramp back over 30 minutes.
 -CFL                            1.5
 # Maximum step number; stops when this or max_time is reached.
 -max_iter                       100000
@@ -224,43 +225,45 @@
 #-probe1.coords                  traj_0
 #-probe1.filename                Probe_0.dat
 
-# === CME insertion ===
+# === GCS CMEs ===
 
-# When CME_type=1, schedule one insertion relative to BC_start_time.
+# Example fit; replace these values with measurements for the event.
+# Set num_CMEs=0 for solar wind only. Repeat CME1.*, CME2.*, ... for more events.
 # Checkpoints retain insertion state to prevent duplicate CMEs on restart.
-
-# CME insertion: 0=off, 1=insert the scheduled flux rope.
--CME_type                       1
-# Insertion epoch (UTC): decimal year or DD-MM-YYYYTHH:MM:SS.
-# Use 0 or an epoch <= BC_start_time to insert at startup.
--CME_Enter_Time                 17-03-2024T12:00:00
-# FRiED flux-rope axis distance scale (solar radii).
--CME_r1                         46.67
-# Flux-rope cross-section radius scale (solar radii).
--CME_r0                         23.33
-# Flux-rope angular half-width (degrees).
--CME_halfangle                  48.00
-# Flux-rope twist parameter (inverse AU).
--CME_pol_flux_control           32.04143
-# FRiED axis-flattening exponent (dimensionless).
--CME_FRiED_n                    0.40
-# CME latitude (degrees).
--CME_lat                        0.00
-# CME longitude (degrees).
--CME_lon                        203.82
-# Flux-rope axis tilt (degrees).
--CME_tilt                       0.00
-# Legacy curvature radius (solar radii); recomputed by the current model.
--CME_Vandas_R0                  18.17
-# CME apex speed (km/s).
--CME_apex_speed                 899.97
-# Legacy thermal-energy control; currently unused.
--CME_energy_control             1.0
-# CME region-marker density (g/cm^3); background density is retained.
--CME_density                    1.38e-23
-# Magnetic helicity sign: +1 or -1.
--CME_helicity_sign              1.00
-# Magnetic-field normalization (G).
--CME_a1                         0.00276
-# Displacement along the flux-rope axis (solar radii).
--CME_shift                      0.0
+-num_CMEs                       1
+# CME geometry: 0=disabled, 1=regular normal-section FRiED (default), 2=GCS with smooth joins.
+# Both use the same GCS/DBM/flux inputs. Type 2 preserves the fitted aspect ratio.
+# Type 2 rejects overlapping sections instead of adjusting the geometry.
+-CME0.CME_type                  1
+# Injection: volume (default) with boundary leg feeding, or experimental boundary emergence.
+# Boundary prescribes the analytic field by superposition; sub-fast inflow is diagnosed.
+-CME0.CME_injection_method      volume
+# Smoothly fade boundary B, added density and excess velocity to WSA over this
+# many seconds after insertion (default 43200 = 12 hours). 0 disables volume leg feeding.
+-CME0.CME_boundary_taper_time    43200
+# GCS leading-edge speed (km/s), final fitted height (solar radii), and UTC epoch.
+-CME0.GCS_speed                  900
+-CME0.GCS_fit_height             15
+-CME0.GCS_fit_time               17-03-2024T12:00:00
+# GCS latitude, Stonyhurst longitude, tilt, half angle (degrees), and aspect ratio.
+-CME0.GCS_latitude               0
+-CME0.GCS_longitude              0
+-CME0.GCS_tilt                   0
+-CME0.GCS_half_angle             40
+-CME0.GCS_aspect_ratio           0.5
+# DBM drag (km^-1), ambient wind (km/s), and reference leading height (solar radii).
+-CME0.DBM_gamma                  1e-8
+-CME0.DBM_wind_speed             450
+-CME0.DBM_target_height          70
+# Positive measured fluxes (Mx); negative or omitted values use empirical estimates.
+-CME0.CME_poloidal_flux          -1
+-CME0.CME_toroidal_flux          -1
+-CME0.CME_leading_polarity       1
+-CME0.CME_helicity_sign          1
+# Minimum added density [g/cm^3]. Loading automatically increases it where needed
+# to keep the initial/inflow Alfven speed <= four times the local radial driver speed.
+-CME0.CME_density                1.38e-23
+# Optional added pressure / rope magnetic pressure; default 0 preserves ambient temperature.
+# -CME0.CME_plasma_beta          0
+# Earth trajectory for the Stonyhurst-to-simulation longitude conversion.
+-CME0.GCS_earth_trajectory       trajEarth

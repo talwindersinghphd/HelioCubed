@@ -3,7 +3,6 @@
 #include "BoxOp_EulerCubedSphere.H"
 #include "MHD_IO.H"
 #include "MHD_CME.H"
-#include "MHD_CME_Schedule.H"
 #include "MHD_LevelRK.H"
 #include "MHD_AMR.H"
 #include <chrono> // Used by timer
@@ -209,8 +208,7 @@ int main(int argc, char *argv[])
       MBLevelBoxData<double, 1, HOST> dVolrLev(layout, OP::ghost() + Point::Basis(0, 2));
       Array<double, DIM> dx;
       auto& eulerOp = *geometry.op;
-      CMEInsertionSchedule cmeSchedule(ParseInputs::get_CME_type() == 1,
-          ParseInputs::get_CME_insertion_time());
+      CMEInsertionSchedule cmeSchedule(ParseInputs::get_CMEs());
       double dxradius = 1.0 / thickness;
       auto C2C = Stencil<double>::CornersToCells(4);
 
@@ -300,20 +298,26 @@ int main(int argc, char *argv[])
 		      dt = h5.dt();   
           restart_step = h5.iter();
           int inserted = ReadCheckpointCMEState(restart_file);
-          cmeSchedule.setInserted(inserted < 0
-              ? cmeSchedule.due(time) : inserted != 0);
+          cmeSchedule.restore(inserted,time);
           pout(0) << "Restarting from step " << restart_step << " at time " << time << " with dt " << dt << endl;
         }
 
       auto insertCMEIfDue = [&]() -> bool
       {
         if (!cmeSchedule.due(time)) return false;
-        OP::Insert_CME(JU,dVolrLev,iop,layout,time,dt,gamma);
-        cmeSchedule.setInserted(true);
-        pout(0) << "CME inserted at simulation time " << setprecision(17)
-                << time << " s (CME_Enter_Time="
-                << ParseInputs::get_CME_Enter_Time() << ")"
-                << setprecision(6) << endl;
+        while (cmeSchedule.due(time)) {
+          const auto& source=ParseInputs::get_CMEs()[cmeSchedule.index()];
+          if(source.injectionMethod==0) OP::Insert_CME(JU,dVolrLev,iop,layout,time,dt,gamma,source);
+          cmeSchedule.markInserted();
+          pout(0) << "CME" << source.sourceIndex << " inserted at simulation time " << setprecision(17)
+                  << time << " s (decimal year "
+                  << source.enterTime << ", method "<<(source.injectionMethod ? "boundary" : "volume")<<")"
+                  << setprecision(6) << endl;
+          if (convTestType == 0)
+            pout(0) << "CME CFL reset to " << cmeSchedule.cfl(time, ParseInputs::get_CFL())
+                    << "; input target " << ParseInputs::get_CFL()
+                    << ", ramp starts after 600 s and reaches target after 2400 s" << endl;
+        }
         return true;
       };
       insertCMEIfDue();
@@ -357,10 +361,11 @@ int main(int argc, char *argv[])
     {
       auto start = chrono::steady_clock::now();
       if ((iter % ParseInputs::get_P_floor_cadence()) == 0) OP::P_floor(JU,dVolrLev,iop,layout,time,dt,gamma);
+      const double stepCFL = cmeSchedule.cfl(time, ParseInputs::get_CFL());
       if (convTestType == 0)
         {
           double dtcfl1 = OP::dtCFL(JU,iop,dVolrLev);
-          dt = dtcfl1*ParseInputs::get_CFL();
+          dt = dtcfl1*stepCFL;
         }
       else if (convTestType == 1 || convTestType == 2)
         {
@@ -383,6 +388,17 @@ int main(int argc, char *argv[])
           dt = max_time - time;
           time_exceeded = true;
         }
+      // Keep one solver throughout every RK step, landing exactly on the
+      // end of the ten-minute Rusanov window before restoring the input solver.
+      const double cmeRusanovEnd = cmeSchedule.rusanovEndTime();
+      const bool cmeRusanov = riemannSolver == 2 && time < cmeRusanovEnd;
+      bool reachesRusanovEnd = convTestType < 3 && cmeRusanov
+          && dt >= cmeRusanovEnd - time;
+      if (reachesRusanovEnd)
+        {
+          dt = cmeRusanovEnd - time;
+          time_exceeded = cmeRusanovEnd == max_time;
+        }
       // Land on the event before advancing the CME. Recompute the normal CFL
       // timestep on the next iteration after the inserted state is available.
       bool reachesCME = convTestType < 3 && !cmeSchedule.inserted()
@@ -391,12 +407,24 @@ int main(int argc, char *argv[])
         {
           dt = cmeSchedule.time() - time;
           time_exceeded = cmeSchedule.time() == max_time;
+          reachesRusanovEnd = cmeSchedule.time() == cmeRusanovEnd;
         }
       bool cmeInsertedThisStep = false;
       if (convTestType < 3)
         {
+          const int previousSolver = ParseInputs::get_Riemann_solver_type();
+          ParseInputs::set_CME_Rusanov(cmeRusanov);
+          if (ParseInputs::get_Riemann_solver_type() != previousSolver)
+            {
+              pout(0) << "Riemann solver = "
+                      << (cmeRusanov ? "Rusanov (CME insertion window)" : "Roe (input solver restored)")
+                      << " at time=" << setprecision(17) << time;
+              if (cmeRusanov) pout(0) << " s, until=" << cmeRusanovEnd;
+              pout(0) << " s" << setprecision(6) << endl;
+            }
           rk4.advance(JU, dVolrLev, dt, time, temporal_order);
           time = reachesCME ? cmeSchedule.time()
+                           : reachesRusanovEnd ? cmeRusanovEnd
                            : time_exceeded ? max_time : time + dt;
           cmeInsertedThisStep = insertCMEIfDue();
           if (!OP::validConservedState(JU))
@@ -425,7 +453,7 @@ int main(int argc, char *argv[])
       // Checkpointing.
       if ((iter % checkpoint_cadence == 0) || (iter == max_iter) || time_exceeded)
         {
-          Write_Checkpoint(JU, iter, restart_step, time, dt, cmeSchedule.inserted());
+          Write_Checkpoint(JU, iter, restart_step, time, dt, cmeSchedule.countInserted());
         }
       
       int probe_trigger_count_now = floor(time/probe_cadence);

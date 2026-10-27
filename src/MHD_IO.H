@@ -1304,7 +1304,7 @@ void Write_W(MBLevelBoxData<double, NUMCOMPS, HOST> &a_JU,
   
 }
 
-// Store the event state in the checkpoint itself. Rank zero adds the scalar
+// Store the number of chronologically inserted events. Rank zero adds the scalar
 // attribute after all ranks have closed the parallel data writer.
 inline void CheckCMECheckpointHDF5(bool a_success, const char* a_operation)
 {
@@ -1319,7 +1319,7 @@ inline void CheckCMECheckpointHDF5(bool a_success, const char* a_operation)
 #define CME_CHECKPOINT_HDF5(operation) \
     CheckCMECheckpointHDF5((operation), #operation)
 
-inline void WriteCheckpointCMEState(std::string a_filename, bool a_inserted)
+inline void WriteCheckpointCMEState(std::string a_filename, int a_inserted)
 {
   barrier();
   if (procID() == 0)
@@ -1330,10 +1330,10 @@ inline void WriteCheckpointCMEState(std::string a_filename, bool a_inserted)
     CME_CHECKPOINT_HDF5(level >= 0);
     auto space = H5Screate(H5S_SCALAR);
     CME_CHECKPOINT_HDF5(space >= 0);
-    auto attr = H5Acreate2(level, "cme_inserted", H5T_NATIVE_INT, space,
+    auto attr = H5Acreate2(level, "cme_inserted_count", H5T_NATIVE_INT, space,
                           H5P_DEFAULT, H5P_DEFAULT);
     CME_CHECKPOINT_HDF5(attr >= 0);
-    int inserted = a_inserted ? 1 : 0;
+    int inserted = a_inserted;
     CME_CHECKPOINT_HDF5(H5Awrite(attr, H5T_NATIVE_INT, &inserted) >= 0);
     CME_CHECKPOINT_HDF5(H5Aclose(attr) >= 0);
     CME_CHECKPOINT_HDF5(H5Sclose(space) >= 0);
@@ -1357,13 +1357,22 @@ inline int ReadCheckpointCMEState(std::string a_filename)
     CME_CHECKPOINT_HDF5(file >= 0);
     auto level = H5Gopen(file, "/level_0", H5P_DEFAULT);
     CME_CHECKPOINT_HDF5(level >= 0);
-    auto exists = H5Aexists(level, "cme_inserted");
+    const char* attribute = "cme_inserted_count";
+    auto exists = H5Aexists(level, attribute);
+    CME_CHECKPOINT_HDF5(exists >= 0);
+    if (exists == 0) {
+      attribute = "cme_inserted";
+      exists = H5Aexists(level, attribute);
+      if (exists > 0 && ParseInputs::get_CMEs().size() > 1)
+        CheckCMECheckpointHDF5(false,"A legacy single-CME checkpoint cannot restore an indexed CME schedule");
+    }
     CME_CHECKPOINT_HDF5(exists >= 0);
     if (exists > 0)
     {
-      auto attr = H5Aopen(level, "cme_inserted", H5P_DEFAULT);
+      auto attr = H5Aopen(level, attribute, H5P_DEFAULT);
       CME_CHECKPOINT_HDF5(attr >= 0);
       CME_CHECKPOINT_HDF5(H5Aread(attr, H5T_NATIVE_INT, &inserted) >= 0);
+      CME_CHECKPOINT_HDF5(inserted >= 0);
       CME_CHECKPOINT_HDF5(H5Aclose(attr) >= 0);
     }
     CME_CHECKPOINT_HDF5(H5Gclose(level) >= 0);
@@ -1433,7 +1442,7 @@ inline void ReadCheckpointState(HDF5Handler& a_h5,
              int restart_step,
              double time = 0.0,
              double dt = 0.0,
-             bool cme_inserted = false)
+             int cme_inserted = 0)
 {
   PR_TIME("Write_Checkpoint");
   HDF5Handler h5;

@@ -286,6 +286,7 @@ public:
   using MapT = decltype(CubedSphereShell::Map(std::declval<const LayoutT&>(),Point()));
   using OpT = decltype(CubedSphereShell::Operator<BoxOp_EulerCubedSphere, double, HOST>(std::declval<MapT&>()));
   using SecondOrderFaceMask = Array<BoxData<unsigned char,1,HOST>,DIM>;
+  using PanelStates = std::array<BoxData<T,NUMCOMPS,MEM>,2*DIM>;
 
   // Short-lived derived values from one final face state. The caller owns
   // these inside the current patch/direction/stage scratch scope.
@@ -312,6 +313,7 @@ public:
 
   struct SecondOrderCFLCache;
   struct SecondOrderBoundaryCache;
+  struct SecondOrderPanelStateCache;
   struct LevelGeometry
   {
     std::unique_ptr<MapT> map;
@@ -319,6 +321,7 @@ public:
     // AMR alternates layouts; each level retains its own immutable CFL metrics.
     std::shared_ptr<SecondOrderCFLCache> secondOrderCFL;
     std::shared_ptr<SecondOrderBoundaryCache> secondOrderBoundary;
+    std::shared_ptr<SecondOrderPanelStateCache> secondOrderPanelStates;
   };
 
   // An AMR hierarchy owns several geometries simultaneously. Bind its level
@@ -355,6 +358,7 @@ public:
     {
       cached.secondOrderCFL.reset();
       cached.secondOrderBoundary.reset();
+      cached.secondOrderPanelStates.reset();
       cached.op.reset();
       cached.map = std::make_unique<MapT>(CubedSphereShell::Map(layout, ghost()));
       cached.op = std::make_unique<OpT>(
@@ -537,6 +541,8 @@ public:
       const SecondOrderFaceMask* activeFaces = nullptr) const;
   inline void reconstructPLM(State& left, State& right,
       const State& primitive, const Box& faces, int dir) const;
+  inline static void prepareSharedPanelStates(
+      const MBLevelBoxData<T,NUMCOMPS,MEM>& primitive);
 
   /// Restore the analytic Cartesian background used by magnetized tests.
   inline void addTestProblemBackgroundB(
@@ -564,7 +570,7 @@ public:
 
   inline static bool validConservedState(
                          const MBLevelBoxData<T,NUMCOMPS,MEM>& a_JU);
-   
+
    inline static T dtCFL(
                          MBLevelBoxData<T,NUMCOMPS,MEM>& a_JU,
                          MBInterpOp& a_iop,
@@ -806,7 +812,8 @@ public:
     MBDisjointBoxLayout &a_layout,
     double a_time,
     double a_dt,
-    double a_gamma);
+    double a_gamma,
+    const CMEParameters& a_cme);
 // End CME
 
 // Begin Floor P
@@ -907,6 +914,9 @@ private:
     std::vector<T> radial;
   };
   mutable std::array<std::shared_ptr<SecondOrderFaceGeometry>,DIM> m_faceGeometry;
+  // Set only while StageLevel evaluates this patch. Individual AMR patch
+  // operators and the analytic test equilibrium use their existing paths.
+  mutable const PanelStates* m_panelStates = nullptr;
   struct SecondOrderBoundaryGeometry
   {
     Box box;

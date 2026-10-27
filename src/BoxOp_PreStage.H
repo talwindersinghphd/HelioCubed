@@ -194,7 +194,7 @@ PreStagePatch(BoxData<T,NUMCOMPS,MEM>& a_USphStage,
     // Find X_cart
     double half = 0.5;
     BoxData<double, DIM, HOST> XCart;
-    if (init_condition_type == 1
+    if (init_condition_type == 1 || !ParseInputs::get_CMEs().empty()
         || (init_condition_type == 0 && ParseInputs::get_BC_conserved_averages() == 0))
     {
       // Only the inner radial ghost cells consume these coordinates.
@@ -324,6 +324,81 @@ PreStagePatch(BoxData<T,NUMCOMPS,MEM>& a_USphStage,
       PROTO_ASSERT(a_BC.box().containsBox(bdryBoxLow),
           "Inner boundary averages do not cover the radial ghost region");
       a_BC.copyTo(a_USphStage,bdryBoxLow);
+    }
+
+    const auto& sources=ParseInputs::get_CMEs();
+    const bool activeBoundarySource=std::any_of(sources.begin(),sources.end(),
+        [&](const auto& source){return CMEModel::boundaryTaperWeight(source,a_time)>0;});
+    if(ParseInputs::get_spatial_order()==2 && activeBoundarySource) {
+      // Re-evaluate the analytic source at every RK stage. Ghosts are first
+      // reset to the WSA boundary above, so overlapping sources and restarts
+      // do not accumulate density or B repeatedly in boundary storage.
+      auto basis=pointwiseSphericalBasis(bdryBoxLow,a_block,-1);
+      auto inverse=forallOverwrite<T,DIM,MEM,DIM>(f_matinv3by3,basis);
+      for(const auto& source:sources) {
+        const double weight=CMEModel::boundaryTaperWeight(source,a_time);
+        if(weight<=0) continue;
+        CMEParameters current;
+        if(!CMEModel::expandedSource(source,a_time,current)) continue;
+        for(auto p:bdryBoxLow) {
+          CMEModel::Sample cme;
+          const CMEModel::Vector position={XCart(p,0),XCart(p,1),XCart(p,2)};
+          // Gate the ghost footprint on the physical boundary sphere. A
+          // coarse ghost center can already be inside the rope when its
+          // front has only just touched the boundary at a single point.
+          const double radius=std::sqrt(position[0]*position[0]+position[1]*position[1]+position[2]*position[2]);
+          CMEModel::Sample faceSample;
+          if(!CMEModel::sample(current,{position[0]*innerRadius/radius,
+              position[1]*innerRadius/radius,position[2]*innerRadius/radius},faceSample)) continue;
+          if(!CMEModel::sample(current,position,cme)) continue;
+          // Load the full boundary source first. Its mass, field and excess
+          // velocity are faded together below, leaving exactly WSA at expiry.
+          cme.density=source.density;
+          std::array<double,8> old{};old[0]=a_USphStage(p,iRHO);
+          double ke=0,me=0,radialOld=0,radialCME=0;
+          for(int d=0;d<3;++d) {
+            for(int q=0;q<3;++q) {
+              old[1+d]+=basis(p,d,q)*a_USphStage(p,iMOMX+q)/old[0];
+              old[5+d]+=basis(p,d,q)*a_USphStage(p,iBX+q);
+            }
+            ke+=.5*old[0]*old[1+d]*old[1+d];me+=old[5+d]*old[5+d]/(8*M_PI);
+            radialOld+=old[1+d]*position[d]/radius;radialCME+=cme.velocity[d]*position[d]/radius;
+          }
+          old[4]=std::max(0.,(a_USphStage(p,iE)-ke-me)*(m_gamma-1));
+          // As in Provornikova et al. (2024), return to the ambient flow
+          // speed when the homologous driver becomes slower than the wind.
+          for(int d=0;d<3;++d)
+            cme.velocity[d]=old[1+d]+std::max(0.,radialCME-radialOld)*position[d]/radius;
+          CMEModel::loadDensity(cme, old, std::max(radialOld,radialCME));
+          CMEModel::taperBoundarySource(cme,old,weight);
+          const auto delta=CMEModel::increment(old,cme,m_gamma,source.plasmaBeta);
+          // Prescribing all primitive variables is justified only for a
+          // super-fast inflow. Expose violations in this experimental driver
+          // rather than silently changing the observed magnetic flux.
+          double b2=0,bn=0;
+          for(int d=0;d<3;++d) {
+            const double b=old[5+d]+cme.field[d];b2+=b*b;bn+=b*position[d]/radius;
+          }
+          const double rho=old[0]+cme.density;
+          const double pressure=CMEModel::thermalPressure(old,cme,source.plasmaBeta);
+          const double cs2=m_gamma*pressure/rho,va2=b2/(4*M_PI*rho),van2=bn*bn/(4*M_PI*rho);
+          const double fast2=.5*(cs2+va2+std::sqrt(std::max(0.,(cs2+va2)*(cs2+va2)-4*cs2*van2)));
+          const double radialInflow=radialOld+weight*std::max(0.,radialCME-radialOld);
+          const double mach=radialInflow/std::sqrt(fast2);
+          static std::vector<int> warnedSources;
+          if(!(mach>1) && std::find(warnedSources.begin(),warnedSources.end(),source.sourceIndex)==warnedSources.end()) {
+            warnedSources.push_back(source.sourceIndex);
+            std::cerr<<"CME boundary diagnostic: rank="<<procID()<<", source="<<source.sourceIndex
+                <<", time="<<a_time<<", fast Mach="<<mach<<", density="<<rho/c_MP
+                <<" cm^-3. Prescribed-primitive injection is sub-fast here and needs a characteristic boundary for physical accuracy.\n";
+          }
+          a_USphStage(p,iRHO)+=delta[0];a_USphStage(p,iE)+=delta[4];
+          for(int d=0;d<3;++d) for(int q=0;q<3;++q) {
+            a_USphStage(p,iMOMX+d)+=inverse(p,d,q)*delta[1+q];
+            a_USphStage(p,iBX+d)+=inverse(p,d,q)*delta[5+q];
+          }
+        }
+      }
     }
 
     if (isConstantMagneticFieldTest(init_condition_type))

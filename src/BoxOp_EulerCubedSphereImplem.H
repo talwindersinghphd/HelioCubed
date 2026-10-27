@@ -841,7 +841,18 @@ inline bool BoxOp_EulerCubedSphere<T,MAP,MEM>::validConservedState(
           for (int i=lo[0]; i<=hi[0]; ++i,++offset)
           {
             const T value=values[offset];
-            invalidFlag |= !std::isfinite(value) || (c==0 && !(value>0));
+            const bool bad=!std::isfinite(value) || (c==0 && !(value>0));
+            if (bad && !invalidFlag)
+            {
+              std::ostringstream message;
+              message << std::setprecision(17)
+                  << "Invalid conserved cell: rank=" << procID()
+                  << " block=" << a_JU.layout().block(dit)
+                  << " index=(" << i << ',' << j << ',' << k << ")"
+                  << " component=" << c << " value=" << value << '\n';
+              std::cerr << message.str() << std::flush;
+            }
+            invalidFlag |= bad;
           }
         }
       if (invalidFlag) break;
@@ -963,6 +974,9 @@ StageLevel(MBLevelBoxData<T,NUMCOMPS,MEM>& a_k,
   auto& eulerOp = *geometry.op;
 
   T wgtxdt = a_weight*a_dt;
+  if constexpr (MEM == HOST)
+    if(usesSecondOrderPrimitives()) prepareSharedPanelStates(a_UStage);
+  unsigned panelPatch=0;
   for (auto dit : a_UStage.layout())
   {
     PROTO_ASSERT(a_k[dit].box() == a_k.layout()[dit],"k_i isn't exactly the size of a rhs");
@@ -981,8 +995,13 @@ StageLevel(MBLevelBoxData<T,NUMCOMPS,MEM>& a_k,
       fluxes[2].setToZero();
     }
     unsigned int block = layout.block(dit);
+    if constexpr (MEM == HOST)
+      if(usesSecondOrderPrimitives())
+        eulerOp[dit].m_panelStates=&geometry.secondOrderPanelStates->adjacent[panelPatch];
     eulerOp[dit](k_i, fluxes, USph_i, 1.0, 1.0, -1,
         usesSecondOrderPrimitives());
+    eulerOp[dit].m_panelStates=nullptr;
+    ++panelPatch;
     auto dx = eulerOp[dit].dx();
     Box blockBox = layout.getBlock(block).domain().box();
     a_blockreg.increment(fluxes,dit,wgtxdt);
@@ -1198,4 +1217,142 @@ P_floor(MBLevelBoxData<T, NUMCOMPS, MEM> &a_JU,
     },JU_i,deta,dVolr_i,a_gamma);
   }
 
+}
+
+// Insert a CME by changing only its physical support. All geometry, field,
+// loading and energy rules are shared with boundary injection in MHD_CME.H.
+template<typename T, typename MAP, MemType MEM>
+inline void BoxOp_EulerCubedSphere<T,MAP,MEM>::Insert_CME(
+    MBLevelBoxData<T,NUMCOMPS,MEM>& state,
+    MBLevelBoxData<T,1,MEM>& radialVolume,
+    MBInterpOp& interpolation,
+    MBDisjointBoxLayout& layout,
+    double time, double dt, double gamma, const CMEParameters& cme)
+{
+    PR_TIME("BoxOp_EulerCubedSphere::Insert_CME()");
+    auto& operators = *levelGeometry(layout).op;
+
+    if (ParseInputs::get_spatial_order() == 2) {
+        long long affected = 0;
+        double addedMass = 0, baselineMass = 0, backgroundMass = 0, maxVa2 = 0;
+        double minAdded = std::numeric_limits<double>::infinity(), maxAdded = 0;
+        for (auto index : layout) {
+            const Box valid = layout[index];
+            auto& op = operators[index];
+            const auto dx = op.dx();
+            Scalar radius(valid), volume(valid);
+            Vector dr(valid), area(valid);
+            op.radialMetrics(radius, dr, area, volume, valid);
+            auto position = forall_p<double,DIM,HOST>(f_cubedSphereMap3, valid,
+                radius, dx, 0.5, 0.5, layout.block(index));
+            auto determinant = CubedSphereShell::detA<double,HOST>(valid, dx[1], 0);
+            auto& conserved = state[index];
+
+            for (auto point : valid) {
+                CMEModel::Sample source;
+                if (!CMEModel::sample(cme,
+                    {position(point,0), position(point,1), position(point,2)}, source)) continue;
+
+                const double jacobian = volume(point) * determinant(point);
+                std::array<double,8> ambient{};
+                ambient[0] = conserved(point,iRHO) / jacobian;
+                double kinetic = 0, magnetic = 0, totalFieldSquared = 0;
+                for (int d = 0; d < 3; ++d) {
+                    ambient[1+d] = conserved(point,iMOMX+d) / (jacobian * ambient[0]);
+                    ambient[5+d] = conserved(point,iBX+d) / jacobian;
+                    kinetic += 0.5 * ambient[0] * ambient[1+d] * ambient[1+d];
+                    magnetic += ambient[5+d] * ambient[5+d] / (8 * M_PI);
+                    totalFieldSquared += std::pow(ambient[5+d] + source.field[d], 2);
+                }
+                ambient[4] = std::max(0.,
+                    (conserved(point,iE) / jacobian - kinetic - magnetic) * (gamma - 1));
+                const double cellVolume = jacobian * dx[0] * dx[1] * dx[2];
+                baselineMass += source.density * cellVolume;
+                backgroundMass += ambient[0] * cellVolume;
+
+                CMEModel::loadDensity(source, ambient);
+                const auto change = CMEModel::increment(ambient, source, gamma, cme.plasmaBeta);
+                for (int component = 0; component < 8; ++component)
+                    conserved(point,component) += jacobian * change[component];
+
+                ++affected;
+                addedMass += source.density * cellVolume;
+                minAdded = std::min(minAdded, source.density);
+                maxAdded = std::max(maxAdded, source.density);
+                maxVa2 = std::max(maxVa2,
+                    totalFieldSquared / (4 * M_PI * (ambient[0] + source.density)));
+            }
+        }
+#ifdef PR_MPI
+        MPI_Allreduce(MPI_IN_PLACE, &affected, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(MPI_IN_PLACE, &addedMass, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(MPI_IN_PLACE, &baselineMass, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(MPI_IN_PLACE, &backgroundMass, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(MPI_IN_PLACE, &maxVa2, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+        MPI_Allreduce(MPI_IN_PLACE, &minAdded, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+        MPI_Allreduce(MPI_IN_PLACE, &maxAdded, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+#endif
+        if (affected == 0) {
+            pout(0) << "CME source contains no resolved insertion cells" << std::endl;
+            return;
+        }
+        pout(0) << std::setprecision(17)
+            << "CME positive-energy insertion: cells " << affected
+            << ", added mass " << addedMass << " g" << std::endl;
+        pout(0) << "CME automatic density loading: baseline mass " << baselineMass
+            << " g, max vA " << std::sqrt(maxVa2)/1e5 << " km/s"
+            << ", added n range [" << minAdded/c_MP << ", " << maxAdded/c_MP << "] cm^-3"
+            << ", enclosed background mass " << backgroundMass << " g"
+            << std::setprecision(6) << std::endl;
+        return;
+    }
+
+    // Fourth-order integration uses the same pointwise source, then maps its
+    // increment back to cell averages. Keep the background outside the source.
+    MBLevelBoxData<T,NUMCOMPS,MEM> native(layout, ghost());
+    state.exchange();
+    state.copyTo(native);
+    prepareState(native, interpolation, radialVolume, time);
+    for (auto index : layout) {
+        auto& op = operators[index];
+        const auto block = layout.block(index);
+        const auto dx = op.dx();
+        Scalar radius(native[index].box()), volume(native[index].box());
+        Vector dr(native[index].box()), area(native[index].box());
+        op.radialMetrics(radius, dr, area, volume, radius.box());
+        State point, average;
+        op.sphToPrim(point, average, native[index], block);
+        point += Stencil<double>::Laplacian()(point, -1./24.);
+        auto position = forall_p<double,DIM,HOST>(f_cubedSphereMap3,
+            radius.box(), radius, dx, 0.5, 0.5, block);
+        auto basis = op.pointwiseSphericalBasis(point.box(), block, -1);
+        auto inverse = forallOverwrite<T,DIM,MEM,DIM>(f_matinv3by3, basis);
+        State baseline;
+        op.primToCons(baseline, point, radialVolume[index], gamma, dx[2], block);
+        for (auto p : point.box()) {
+            CMEModel::Sample source;
+            if (!CMEModel::sample(cme, {position(p,0),position(p,1),position(p,2)}, source)) continue;
+            std::array<double,8> ambient{};
+            ambient[0] = point(p,iRHO);
+            ambient[4] = std::max(0., point(p,iP));
+            for (int d = 0; d < 3; ++d) for (int q = 0; q < 3; ++q) {
+                ambient[1+d] += basis(p,d,q) * point(p,iVX+q);
+                ambient[5+d] += basis(p,d,q) * point(p,iBX+q);
+            }
+            CMEModel::loadDensity(source, ambient);
+            point(p,iRHO) = ambient[0] + source.density;
+            point(p,iP) = CMEModel::thermalPressure(ambient, source, cme.plasmaBeta);
+            for (int d = 0; d < 3; ++d) {
+                point(p,iVX+d) = point(p,iBX+d) = 0;
+                for (int q = 0; q < 3; ++q) {
+                    point(p,iVX+d) += inverse(p,d,q) * source.velocity[q];
+                    point(p,iBX+d) += inverse(p,d,q) * (ambient[5+q] + source.field[q]);
+                }
+            }
+        }
+        State inserted;
+        op.primToCons(inserted, point, radialVolume[index], gamma, dx[2], block);
+        inserted -= baseline;
+        state[index] += inserted;
+    }
 }

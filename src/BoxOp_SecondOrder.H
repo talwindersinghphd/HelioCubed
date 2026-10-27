@@ -37,6 +37,89 @@ inline ACCEL_DECORATION void reconstructSecondOrderFace(Left& lo,Right& hi,
 }
 }
 
+// A panel seam is one physical face. Exchange the reconstructed state from
+// each real adjacent cell, rather than solving against interpolated ghosts
+// independently and averaging two different Riemann problems afterward.
+template<typename T, typename MAP, MemType MEM>
+struct BoxOp_EulerCubedSphere<T,MAP,MEM>::SecondOrderPanelStateCache
+{
+    LayoutT layout;
+    MBBoundaryRegister<T,NUMCOMPS,MEM> exchange;
+    std::vector<PanelStates> adjacent;
+
+    explicit SecondOrderPanelStateCache(const LayoutT& l)
+        :layout(l),exchange(l,1,Point::Zeros())
+    {
+        for(auto index:l)
+        {
+            adjacent.emplace_back();
+            for(const auto& boundary:exchange.bounds(index))
+            {
+                if(boundary.localDir.codim()!=1) continue;
+                const auto face=boundary.localFace();
+                const unsigned slot=2*face.dir+int(face.side);
+                adjacent.back()[slot].defineForOverwrite(
+                    l[index].extrude(face.dir).face(face.dir,face.side));
+            }
+        }
+    }
+};
+
+template<typename T, typename MAP, MemType MEM>
+inline void BoxOp_EulerCubedSphere<T,MAP,MEM>::prepareSharedPanelStates(
+    const MBLevelBoxData<T,NUMCOMPS,MEM>& primitive)
+{
+    PR_TIMERS("HelioCubed::sharedPanelStates");
+    const auto& layout=primitive.layout();
+    auto& cache=levelGeometry(layout).secondOrderPanelStates;
+    if(!cache || &cache->layout.partition()!=&layout.partition())
+        cache=std::make_shared<SecondOrderPanelStateCache>(layout);
+    auto& exchange=cache->exchange;
+    exchange.clear();
+    const int limiter=ParseInputs::get_limiter();
+    for(auto index:layout)
+    {
+        const auto& w=primitive[index];
+        for(const auto& boundary:exchange.bounds(index))
+        {
+            if(boundary.localDir.codim()!=1) continue;
+            const auto face=boundary.localFace();
+            const Point step=Point::Basis(face.dir);
+            const Box faces=layout[index].extrude(face.dir).face(face.dir,face.side);
+            for(auto p:faces)
+            {
+                HelioCubed::LocalFaceState<T> left,right;
+                HelioCubed::reconstructSecondOrderFace<T>(left,right,
+                    w.var(p-2*step),w.var(p-step),w.var(p),w.var(p+step),limiter);
+                for(unsigned c=0;c<NUMCOMPS;++c)
+                    (*boundary.localData)(p,c)=face.side==Side::Lo ? right(c) : left(c);
+            }
+        }
+    }
+    exchange.exchange();
+    unsigned patch=0;
+    for(auto index:layout)
+    {
+        auto& incoming=cache->adjacent[patch++];
+        for(const auto& boundary:exchange.bounds(index))
+        {
+            if(boundary.localDir.codim()!=1) continue;
+            const auto face=boundary.localFace();
+            const auto inverse=boundary.adjToLocal.inverse();
+            const Point normal=Point::Basis(face.dir,face.side);
+            const Point adjacentNormal=-inverse(normal);
+            const int orientation=adjacentNormal.dot(adjacentNormal*adjacentNormal);
+            // Use the same face-centering offset as the boundary register.
+            // The exchanged Cartesian primitive components need no sign flip.
+            const Point shift=orientation*(2*int(face.side)-1)==1
+                ? Point::Basis(face.dir) : Point::Zeros();
+            auto& states=incoming[2*face.dir+int(face.side)];
+            for(auto p:states.box()) for(unsigned c=0;c<NUMCOMPS;++c)
+                states(p,c)=(*boundary.adjData)(p-shift,c);
+        }
+    }
+}
+
 
 // Face i is the low face of cell i. Reconstruction is linear in the uniform
 // mapped coordinates; the geometry is evaluated at the corresponding face.
@@ -88,6 +171,7 @@ inline void BoxOp_EulerCubedSphere<T,MAP,MEM>::secondOrderOperator(
         HelioCubed::nativePrimitivesToCartesian(converted,native,basis);
     }
     const State& w=cartesianPrimitives ? state : converted;
+    const auto* panelStates=cartesianPrimitives ? m_panelStates : nullptr;
     const Box metricBox=rhs.box().grow(1);
     Scalar minusDiv(rhs.box(),T(0));
     Scalar radius,volume;
@@ -158,6 +242,10 @@ inline void BoxOp_EulerCubedSphere<T,MAP,MEM>::secondOrderOperator(
             PROTO_ASSERT(!activeFaces || (*activeFaces)[dir].box()==faces,
                 "The active AMR face mask must match the flux storage");
             const unsigned char* active=activeFaces ? (*activeFaces)[dir].data() : nullptr;
+            const auto* panelLow=panelStates && !(*panelStates)[2*dir].box().empty()
+                ? &(*panelStates)[2*dir] : nullptr;
+            const auto* panelHigh=panelStates && !(*panelStates)[2*dir+1].box().empty()
+                ? &(*panelStates)[2*dir+1] : nullptr;
             size_t angular=0,offset=0;
             for (int k=low[2]; k<=high[2]; ++k) for (int j=low[1]; j<=high[1]; ++j)
             {
@@ -179,6 +267,11 @@ inline void BoxOp_EulerCubedSphere<T,MAP,MEM>::secondOrderOperator(
                         m{center-step,sourceStride},c{center,sourceStride},p{center+step,sourceStride};
                     HelioCubed::LocalFaceState<T> l,r;
                     HelioCubed::reconstructSecondOrderFace<T>(l,r,mm,m,c,p,limiter);
+                    const Point facePoint(i,j,k);
+                    if(panelLow && facePoint[dir]==panelLow->box().low()[dir])
+                        for(unsigned c=0;c<NUMCOMPS;++c) l(c)=(*panelLow)(facePoint,c);
+                    if(panelHigh && facePoint[dir]==panelHigh->box().low()[dir])
+                        for(unsigned c=0;c<NUMCOMPS;++c) r(c)=(*panelHigh)(facePoint,c);
                     if (magneticTest) {l(iBX)+=b0;r(iBX)+=b0;}
                     HelioCubed::StridedFaceState<T> out{output+offset,stride};
                     const T area=cache->radial[i-low[0]];
