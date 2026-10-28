@@ -17,6 +17,7 @@
 #include "MHD_Time.H"
 #include "MHD_AMRTagging.H"
 #include "MHD_CME.H"
+#include "MHD_Thomson.H"
 
 #ifndef GIT_HASH_RAW
 #define GIT_HASH_RAW unknown_hash
@@ -157,6 +158,11 @@ private:
     std::vector<std::string> probe_filenames;           
     std::vector<std::string> probe_coords;  // Accepts HGI coordinates              
     double Probe_cadence = 1000000000; // In seconds
+    int num_jmaps=0, Jmap_elongation_bins=201;
+    double Jmap_cadence=3600, Jmap_min_elongation=10, Jmap_max_elongation=50;
+    double Jmap_los_step=0.001; // Maximum quadrature spacing, AU.
+    string Jmap_cadence_raw,Jmap_min_elongation_raw,Jmap_max_elongation_raw,Jmap_los_step_raw;
+    std::vector<HelioCubed::JmapParameters> jmaps;
     double BC_start_time = 0.0; // Like 2024.0 for year 2024
     // Epochs must bypass InputArgs' single-precision numeric conversion.
     string BC_start_time_raw = "0";
@@ -282,6 +288,12 @@ public:
     static const std::vector<std::string>& get_probe_filenames() { return getInstance().probe_filenames; } 
     static const std::vector<std::string>& get_probe_coords()     { return getInstance().probe_coords; }     
     static double get_Probe_cadence() {return getInstance().Probe_cadence;}
+    static const auto& get_jmaps() {return getInstance().jmaps;}
+    static double get_Jmap_cadence() {return getInstance().Jmap_cadence;}
+    static double get_Jmap_min_elongation() {return getInstance().Jmap_min_elongation;}
+    static double get_Jmap_max_elongation() {return getInstance().Jmap_max_elongation;}
+    static int get_Jmap_elongation_bins() {return getInstance().Jmap_elongation_bins;}
+    static double get_Jmap_los_step() {return getInstance().Jmap_los_step;}
     static double get_BC_start_time() {return getInstance().BC_start_time;}
     static const CalendarEpoch& get_BC_start_epoch() {return getInstance().BC_start_epoch;}
     static double get_BC_cadence() {return getInstance().BC_cadence;}
@@ -416,6 +428,23 @@ public:
             args.add(base + "coords",   probe_coords[(size_t)i]);
         }
         args.add("Probe_cadence", Probe_cadence);
+        args.add("num_jmaps",num_jmaps);
+        args.add("Jmap_cadence",Jmap_cadence_raw);
+        args.add("Jmap_min_elongation",Jmap_min_elongation_raw);
+        args.add("Jmap_max_elongation",Jmap_max_elongation_raw);
+        args.add("Jmap_elongation_bins",Jmap_elongation_bins);
+        args.add("Jmap_los_step",Jmap_los_step_raw);
+        constexpr int MAX_JMAPS=8;
+        std::vector<string> jmapPositionAngles(MAX_JMAPS);
+        jmaps.resize(MAX_JMAPS);
+        for(int i=0;i<MAX_JMAPS;++i)
+        {
+            const string base="jmap"+std::to_string(i)+".";
+            args.add(base+"filename",jmaps[i].filename);
+            args.add(base+"observer",jmaps[i].observer);
+            args.add(base+"reference",jmaps[i].reference);
+            args.add(base+"position_angle",jmapPositionAngles[i]);
+        }
         args.add("BC_start_time", BC_start_time_raw);
         args.add("BC_cadence", BC_cadence);
         args.add("BC_frame_rotate", BC_frame_rotate);
@@ -749,6 +778,29 @@ public:
             throw std::invalid_argument("num_probes must be between 0 and 32.");
         probe_filenames.resize((size_t)std::max(0, num_probes));
         probe_coords.resize((size_t)std::max(0, num_probes));
+        if(num_jmaps<0 || num_jmaps>MAX_JMAPS)
+            throw std::invalid_argument("num_jmaps must be between 0 and 8");
+        jmaps.resize(num_jmaps);
+        Jmap_cadence=parsePreciseValue(Jmap_cadence_raw,"Jmap_cadence",Jmap_cadence);
+        Jmap_min_elongation=parsePreciseValue(Jmap_min_elongation_raw,"Jmap_min_elongation",Jmap_min_elongation);
+        Jmap_max_elongation=parsePreciseValue(Jmap_max_elongation_raw,"Jmap_max_elongation",Jmap_max_elongation);
+        Jmap_los_step=parsePreciseValue(Jmap_los_step_raw,"Jmap_los_step",Jmap_los_step);
+        for(int i=0;i<num_jmaps;++i)
+            jmaps[i].positionAngle=parsePreciseValue(jmapPositionAngles[i],"J-map position angle",90);
+        if(num_jmaps && (!(Jmap_cadence>0) || !std::isfinite(Jmap_cadence)
+            || !(Jmap_los_step>0) || !std::isfinite(Jmap_los_step)
+            || !(Jmap_min_elongation>0 && Jmap_max_elongation<180
+                && Jmap_max_elongation>Jmap_min_elongation)
+            || Jmap_elongation_bins<2 || Jmap_elongation_bins>10000))
+            throw std::invalid_argument("Invalid J-map cadence, LOS step, or elongation grid");
+        std::vector<string> jmapNames;
+        for(const auto& jmap : jmaps)
+        {
+            if(jmap.filename.empty() || jmap.observer.empty() || !std::isfinite(jmap.positionAngle)
+                || std::find(jmapNames.begin(),jmapNames.end(),jmap.filename)!=jmapNames.end())
+                throw std::invalid_argument("Each J-map needs a unique filename, observer trajectory, and finite position angle");
+            jmapNames.push_back(jmap.filename);
+        }
 
         pout(0) << setw(75) << setfill('-') << "-" << endl;
         pout(0) << "Last git pull info:" << endl;
@@ -855,6 +907,19 @@ public:
         for (int i = 0; i < num_probes; ++i) {        
             pout(0) << "  probe" << i << ".filename: " << probe_filenames[static_cast<size_t>(i)] << endl;
             pout(0) << "  probe" << i << ".coords:   " << probe_coords[static_cast<size_t>(i)]   << endl;
+        }
+        if(num_jmaps)
+        {
+            pout(0)<<"J-map cadence: "<<Jmap_cadence<<" s; elongation "<<Jmap_min_elongation
+                <<" to "<<Jmap_max_elongation<<" deg in "<<Jmap_elongation_bins
+                <<" bins; LOS step <= "<<Jmap_los_step<<" AU"<<endl;
+            for(const auto& jmap : jmaps)
+            {
+                pout(0)<<"J-map "<<jmap.filename<<": observer "<<jmap.observer;
+                if(jmap.reference.empty()) pout(0)<<", PA "<<jmap.positionAngle<<" deg";
+                else pout(0)<<", slit toward "<<jmap.reference;
+                pout(0)<<endl;
+            }
         }
         pout(0) << "Probe_cadence: " << Probe_cadence << endl;
         pout(0) << "BC_start_time: " << BC_start_time_raw << endl;

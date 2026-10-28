@@ -5,6 +5,7 @@
 #include "MHD_AMRTransfers.H"
 #include "MHD_AMRTagging.H"
 #include "MHD_IO.H"
+#include "MHD_Jmap.H"
 #include "MHD_CME.H"
 #include <chrono>
 #include <cstdio>

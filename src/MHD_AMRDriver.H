@@ -136,6 +136,18 @@ inline void runCubedSphereAMR()
         int iteration=simulation.restartIteration;
         bool giveSpace=true;
         const bool insertedAtStart=simulation.insertCME(time);
+        auto writeMaps=[&](bool force)
+        {
+            if(ParseInputs::get_jmaps().empty()) return;
+            std::vector<JmapGrid> grids;
+            for(unsigned l=0;l<simulation.numLevels();++l)
+            {
+                const auto& grid=simulation.level(l);
+                grids.push_back({&grid.state,&grid.jacobian,true});
+            }
+            writeJmaps(grids,iteration,time,force,suffix);
+        };
+        writeMaps(true);
         if(mode<3)
         {
             simulation.write(iteration,time,dt,false);
@@ -241,6 +253,7 @@ inline void runCubedSphereAMR()
                     if(last || inserted || nextProbe!=probeTrigger)
                     {simulation.writeProbes(iteration,time,giveSpace);giveSpace=false;probeTrigger=nextProbe;}
                 }
+                writeMaps(last);
                 const double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
                 pout(0)<<formatIterationProgress(iteration,dt,time,seconds)<<std::endl;
                 if(last) break;

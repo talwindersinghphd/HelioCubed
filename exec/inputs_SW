@@ -227,6 +227,22 @@
 #-probe1.coords                  traj_0
 #-probe1.filename                Probe_0.dat
 
+# === Synthetic white-light J-maps ===
+
+# It does no sampling when num_jmaps=0. Up to 8 observers are supported.
+-num_jmaps                      0
+# Output interval (s), elongation range (degrees), and number of angular bins.
+#-Jmap_cadence                   3600
+#-Jmap_min_elongation            6
+#-Jmap_max_elongation            50
+#-Jmap_elongation_bins           201
+# Maximum midpoint-quadrature step along each ray (AU); check LOS convergence.
+#-Jmap_los_step                  0.001
+#-jmap0.observer                 trajStereoA.dat
+#-jmap0.reference                trajEarth.dat
+#-jmap0.filename                 StereoA_jmap.csv
+# Make plots and running differences with scripts/synthetic_jmap.py.
+
 # === GCS CMEs ===
 
 # Example fit; replace these values with measurements for the event.
@@ -238,7 +254,7 @@
 # Type 2 rejects overlapping sections instead of adjusting the geometry.
 -CME0.CME_type                  1
 # Injection: "volume" (default) with boundary leg feeding, or "boundary" emergence.
-# Boundary emergence requires spatial_order=2 and spatial_operator=1; supports AMR.
+# Boundary emergence requires spatial_order=2 and spatial_operator=1;
 -CME0.CME_injection_method      volume
 # Smoothly fade boundary B, added density and excess velocity to WSA over this
 # many seconds after insertion (default 43200 = 12 hours). 0 disables volume leg feeding.
@@ -268,4 +284,4 @@
 # Optional added pressure / rope magnetic pressure; default 0 preserves ambient temperature.
 # -CME0.CME_plasma_beta          0
 # Earth trajectory for the Stonyhurst-to-simulation longitude conversion.
--CME0.GCS_earth_trajectory       trajEarth
+-CME0.GCS_earth_trajectory       trajEarth.dat

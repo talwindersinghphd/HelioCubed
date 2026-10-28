@@ -2,6 +2,7 @@
 #include "InputParser.H"
 #include "BoxOp_EulerCubedSphere.H"
 #include "MHD_IO.H"
+#include "MHD_Jmap.H"
 #include "MHD_CME.H"
 #include "MHD_LevelRK.H"
 #include "MHD_AMR.H"
@@ -328,6 +329,8 @@ int main(int argc, char *argv[])
       HelioCubed::MBLevelRK<BoxOp_EulerCubedSphere, MBMap_CubedSphereShell<HOST>, double> rk4(map, iop);
       // OP::P_floor(JU,dVolrLev,iop,layout,time,dt,gamma);
       Write_W(JU, eulerOp, iop, restart_step, time, dt, true, true);            
+      if(!ParseInputs::get_jmaps().empty())
+        HelioCubed::writeJmaps({{&JU,&dVolrLev,false}},restart_step,time,true);
       // Write_W and preStageLevel fill their own boundary states. The former
       // throwaway JUTemp fill passed mapped JU as if it were primitive file
       // data and discarded the result.
@@ -481,6 +484,8 @@ int main(int argc, char *argv[])
         pout(0) << "Probed at iteration " << iter << endl;
       }
       
+      if(!ParseInputs::get_jmaps().empty())
+        HelioCubed::writeJmaps({{&JU,&dVolrLev,false}},iter,time,time_exceeded || iter==max_iter);
       auto end = chrono::steady_clock::now();
       std::chrono::duration<double> elapsed_seconds = end-start;
       pout(0) << formatIterationProgress(iter,dt,time,elapsed_seconds.count()) << endl;
