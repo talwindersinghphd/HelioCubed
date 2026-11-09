@@ -71,6 +71,12 @@ namespace MHD_Set_Boundary_Values {
 		double By = a_W(6)*1.0e-6*pow(inputs.r_in*c_AU/rad,1.0);
 		double Bz = a_W(7)*1.0e-6*pow(inputs.r_in*c_AU/rad,1.0);
 
+		// Boundary files contain inertial velocities. Convert at the actual
+		// ghost-cell radius before building momentum and kinetic energy.
+		if (inputs.corotating_frame == 1)
+		{
+			w -= inputs.solar_angular_velocity()*rad*sin(a_x_sph(1));
+		}
 
 		double e = p/(a_gamma-1.0) + rho*(u*u+v*v+w*w)/2.0 + (Bx*Bx+By*By+Bz*Bz)/8.0/c_PI;
 
@@ -126,7 +132,7 @@ namespace MHD_Set_Boundary_Values {
 					}
 					BoxData<double,DIM> x_sph(BoundBox);
 					MHD_Mapping::get_sph_coords_cc(x_sph,BoundBox,a_dx, a_dy, a_dz);
-					double scaling_factor;
+					double scaling_factor = 0.0;
 					#if TURB == 1
 					double time_days = a_time/inputs.velocity_scale/24./60./60.;
 					scaling_factor = min(time_days,inputs.Scaling_time)/inputs.Scaling_time;

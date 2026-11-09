@@ -8,6 +8,19 @@ extern Parsefrominputs inputs;
 /// @brief MHD_Output_Writer namespace
 namespace MHD_Output_Writer {
 
+	PROTO_KERNEL_START
+	void InertialOutputVelocityF(const Point& a_pt,
+	                             State& a_W_cart,
+	                             const V& a_x_cart,
+	                             double a_omega)
+	{
+		// Dimensional primitive velocities: v_inertial = v_rotating + Omega x r.
+		// Components remain on the simulation's Cartesian axes.
+		a_W_cart(iVX) -= a_omega*a_x_cart(1);
+		a_W_cart(iVY) += a_omega*a_x_cart(0);
+	}
+	PROTO_KERNEL_END(InertialOutputVelocityF, InertialOutputVelocity)
+
 	void Write_data(MHDLevelDataState& state,
 					const int k,
 					const double time,
@@ -30,6 +43,15 @@ namespace MHD_Output_Writer {
 			state.m_U[dit].copyTo(new_state2[dit]);
 			MHDOp::NonDimToDimcalc(new_state2[dit]);
 			MHDOp::consToPrimcalc(new_state3[ dit],new_state2[ dit],inputs.gamma);
+			MHD_Mapping::get_cart_coords_cc(phys_coords[ dit],phys_coords[ dit].box(),dx,dy,dz);
+			if (inputs.corotating_frame == 1)
+			{
+				// Recover thermal pressure before boosting only the output velocities.
+				// Spherical projection then adds Omega*r*sin(theta) to Vp.
+				const double omega = inputs.solar_angular_velocity();
+				forallInPlace_p(InertialOutputVelocity, new_state3[dit],
+				        phys_coords[dit], omega);
+			}
 			if (inputs.output_in_spherical_coords == 1){
 				MHD_Mapping::get_sph_coords_cc(x_sph[ dit],x_sph[ dit].box(),dx, dy, dz);
 				MHD_Mapping::Cartesian_to_Spherical(new_state[ dit],new_state3[ dit],x_sph[ dit]);
@@ -37,7 +59,6 @@ namespace MHD_Output_Writer {
 				new_state3[ dit].copyTo(new_state[ dit]);
 			}
 
-			MHD_Mapping::get_cart_coords_cc(phys_coords[ dit],phys_coords[ dit].box(),dx,dy,dz);
 			MHD_Mapping::out_data_calc(out_data[ dit],phys_coords[ dit],new_state[ dit]);
 		}
 	

@@ -77,6 +77,13 @@ namespace MHD_Initialize {
 		// rho = rho0 + amplitude * rho0;
 		// p = p0 * pow(rho / rho0, a_gamma);
 
+		// The analytic state specifies inertial velocities, as do the BC files.
+		// This kernel also supplies the analytic inner-boundary ghost cells.
+		if (inputs.corotating_frame == 1)
+		{
+			w -= inputs.solar_angular_velocity()*rad*sin(theta);
+		}
+
 		double e = p/(gamma-1.0) + rho*(u*u+v*v+w*w)/2.0 + (Bx*Bx+By*By+Bz*Bz)/8.0/c_PI;
 
 #if TURB == 1

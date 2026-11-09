@@ -43,8 +43,9 @@
 -Sun_gravity                     1
 
 # Reference frame: 0 = inertial, 1 = co-rotating (fixed BC map longitudes)
-# Boundary and initial velocities are interpreted in the selected frame.
--corotating_frame                0
+# Boundary files and analytic initial velocities are inertial; co-rotating runs
+# automatically convert v_phi to v_phi - Omega*r*sin(theta).
+-corotating_frame                1
 
 # Sidereal solar rotation period in days (defaults to 25.38 if omitted)
 # Used for inertial BC rotation and co-rotating forces/probe transforms.
@@ -62,7 +63,8 @@
 # Are initail conditions set in spherical coordinates?
 -initialize_in_spherical_coords  1
 
-# Output in spherical coordinates?
+# Output vectors in spherical components? Data-file velocities are inertial;
+# spatial coordinates remain on the simulation grid.
 -output_in_spherical_coords      1    
 
 # Inner radius in AU
