@@ -1,9 +1,11 @@
 #pragma once
 
 #include "MHD_Error.H"
+#include "MHD_Constants.H"
 
 #include "Proto.H"
 #include "InputParser.H"
+#include <cmath>
 
 using namespace Proto;
 /// @brief Parsefrominputs class
@@ -25,6 +27,8 @@ class Parsefrominputs {
     int limiter_apply;
     int takedivBstep;
     int Sun_gravity = 1; // 1: Include solar gravity as an explicit source term
+    int corotating_frame = 0; // 0: Inertial frame, 1: Frame rotating about +z
+    double solar_rotation_period = 25.38; // Sidereal solar rotation period in days
     int timeIntegratorType; // 1: Euler, 2: RK2, 3: Hancock, 4: RK4
     int Riemann_solver_type;  //1: Rusanov Solver, 2: Roe Solver
     double entropy_fix_coeff;
@@ -57,6 +61,16 @@ class Parsefrominputs {
 	double smallTM = 1.0e-8;
   public:
 
+	double solar_rotation_period_seconds() const
+	{
+		return solar_rotation_period*24.0*60.0*60.0;
+	}
+
+	double solar_angular_velocity() const
+	{
+		return 2.0*c_PI/solar_rotation_period_seconds();
+	}
+
 	string removeSpaces(string str)
 	{
 		str.erase(remove(str.begin(), str.end(), ' '), str.end());
@@ -88,6 +102,8 @@ class Parsefrominputs {
 		args.add("limiter_apply",  limiter_apply);
 		args.add("takedivBstep",  takedivBstep);
 		args.add("Sun_gravity",  Sun_gravity);
+		args.add("corotating_frame",  corotating_frame);
+		args.add("solar_rotation_period",  solar_rotation_period);
 		args.add("timeIntegratorType",  timeIntegratorType);
 		args.add("Riemann_solver_type",  Riemann_solver_type);
 		args.add("entropy_fix_coeff",  entropy_fix_coeff);
@@ -145,6 +161,13 @@ class Parsefrominputs {
 				"timeIntegratorType must be 1 (Euler), 2 (RK2), 3 (Hancock), or 4 (RK4).");
 		MHD::require(Riemann_solver_type == 1 || Riemann_solver_type == 2,
 				"Riemann_solver_type must be 1 (Rusanov) or 2 (Roe).");
+		MHD::require(corotating_frame == 0 || corotating_frame == 1,
+				"corotating_frame must be 0 (inertial) or 1 (co-rotating).");
+		MHD::require(std::isfinite(solar_rotation_period) && solar_rotation_period > 0.0,
+				"solar_rotation_period must be finite and positive (days).");
+		MHD::require(corotating_frame == 0 ||
+				(std::isfinite(velocity_scale) && velocity_scale > 0.0),
+				"Co-rotating runs require a finite, positive velocity_scale.");
 		// args.print(); //It prints, but not in the order I want.
 
 		int pid = procID();
@@ -168,6 +191,8 @@ class Parsefrominputs {
 			cout << "limiter_apply: "    << limiter_apply << endl;
 			cout << "takedivBstep: "    << takedivBstep << endl;
 			cout << "Sun_gravity: "    << Sun_gravity << endl;
+			cout << "corotating_frame: "    << corotating_frame << endl;
+			cout << "solar_rotation_period: "    << solar_rotation_period << endl;
 			cout << "timeIntegratorType: "    << timeIntegratorType << endl;
 			cout << "Riemann_solver_type: "    << Riemann_solver_type << endl;
 			cout << "entropy_fix_coeff: "    << entropy_fix_coeff << endl;

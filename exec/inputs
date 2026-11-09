@@ -42,6 +42,14 @@
 # Include solar gravity as an explicit source term?
 -Sun_gravity                     1
 
+# Reference frame: 0 = inertial, 1 = co-rotating (fixed BC map longitudes)
+# Boundary and initial velocities are interpreted in the selected frame.
+-corotating_frame                0
+
+# Sidereal solar rotation period in days (defaults to 25.38 if omitted)
+# Used for inertial BC rotation and co-rotating forces/probe transforms.
+-solar_rotation_period           25.38
+
 # Time integrator: 1 = Euler, 2 = RK2, 3 = Hancock, 4 = RK4
 -timeIntegratorType              3
 
@@ -72,7 +80,7 @@
 # BC cadence in hours
 -BC_cadence                      1.0
 
-# Do BC frames rotate?
+# Do supplied BC frames rotate? Used only in the inertial simulation frame.
 -BC_frame_rotate                 0
 
 # Probe cadence in seconds

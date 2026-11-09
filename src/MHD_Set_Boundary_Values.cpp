@@ -221,15 +221,32 @@ namespace MHD_Set_Boundary_Values {
 			low_frame_now = static_cast<int>(time/(h5_cadence*3600.0));
 		}
 
-		// Once the final frame time is reached, keep that frame and rotate it
-		// continuously, just as for a single-frame boundary file.
-		if ((BC_data.size() == 1) ||
+		if (inputs.corotating_frame == 1)
+		{
+			// Maps are already in the rotating frame. Keep their longitudes fixed,
+			// but retain time interpolation and hold the last available frame.
+			const int low_frame = std::min(
+			        low_frame_now, static_cast<int>(BC_data.size())-1);
+			const int next_frame = std::min(
+			        low_frame+1, static_cast<int>(BC_data.size())-1);
+			const double fraction = (low_frame == next_frame) ? 0.0 :
+			        time/(h5_cadence*3600.0)-low_frame;
+			for (auto dit : state.m_U)
+			{
+				const Box boundary_box = state.m_BC[dit].box() &
+				        BC_data[low_frame].box() & BC_data[next_frame].box();
+				if (boundary_box.empty()) continue;
+				forallInPlace_p(
+				        InterpolateFrames, boundary_box, state.m_BC[dit],
+				        BC_data[low_frame], BC_data[next_frame], fraction);
+			}
+		}
+		// In the inertial frame, rotate a single/final map continuously.
+		else if ((BC_data.size() == 1) ||
 			(low_frame_now >= static_cast<int>(BC_data.size())-1)){
 			int frame_to_rotate = (BC_data.size() == 1) ? 0 : static_cast<int>(BC_data.size())-1;
 			BoxData<double, NUMCOMPS> BC_data_rotated;
-			double carr_rot_time = 25.38*24*60*60; // Seconds
-			// We should use sidereal time for this. 25.38 days. That's the rotation time from a fixed location.
-			// Carrington rotation time (27.2753 days) is from Earth's prespective.
+			const double carr_rot_time = inputs.solar_rotation_period_seconds();
 			double angle_to_rotate = fmod(360*time/carr_rot_time,360);
 			int cells_to_rotate = angle_to_rotate/(360.0/inputs.domainSizez);
 			double needed_fraction = angle_to_rotate/(360.0/inputs.domainSizez) - cells_to_rotate;
@@ -264,7 +281,7 @@ namespace MHD_Set_Boundary_Values {
 			
 			BoxData<double, NUMCOMPS> BC_data_rotated1;
 			BoxData<double, NUMCOMPS> BC_data_rotated2;
-			double carr_rot_time = 25.38*24*60*60; // Seconds
+			const double carr_rot_time = inputs.solar_rotation_period_seconds();
 
 			double effective_time1 = 360*(time_temp+low_frame*h5_cadence*3600)/carr_rot_time;
 			double effective_time2 = 360*(time_temp+next_frame*h5_cadence*3600)/carr_rot_time;

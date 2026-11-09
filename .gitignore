@@ -2,6 +2,7 @@
 /exec/BC
 /exec/Probe
 /exec/Expanse
+/private/
 /.vscode
 *.hdf5
 *.h5

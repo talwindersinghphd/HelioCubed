@@ -18,6 +18,7 @@
 #include "MHD_Constants.H"
 #include "MHD_CFL.H"
 #include "MHD_Gravity.H"
+#include "MHD_Rotation.H"
 #include "MHDLevelDataRK4.H"
 #include "MHD_Turbulence.H"
 #include "PolarExchangeCopier.H"
@@ -520,6 +521,8 @@ namespace MHDOp {
 		a_P(5) = (a_F(0)/volume)*a_W(1);
 		a_P(6) = (a_F(0)/volume)*a_W(2);
 		a_P(7) = (a_F(0)/volume)*a_W(3);
+		// Powell cleaning has no source for the extra turbulence variables.
+		for (int i = 2*DIM+2; i < NUMCOMPS; ++i) a_P(i) = 0.0;
 	}
 	PROTO_KERNEL_END(Powell_Sph_2OF, Powell_Sph_2O)
 
@@ -672,6 +675,12 @@ namespace MHDOp {
 				MHD_Gravity::add_gravity_source(
 				        a_Rhs[dit], W_sph, a_State.m_x_sph_cc[dit],
 				        inputs.velocity_scale);
+			}
+			if (inputs.corotating_frame == 1)
+			{
+				MHD_Rotation::add_rotation_source(
+				        a_Rhs[dit], W_cart, a_State.m_x_sph_cc[dit],
+				        inputs.velocity_scale, inputs.solar_angular_velocity());
 			}
 			if (!a_State.m_divB_calculated && inputs.takedivBstep == 1) forallInPlace_p(Powell_Sph_2O,a_State.m_divB[dit],W_cart,RhsV_divB,a_State.m_cell_volume[dit]);		
 			// Vector RHS(dbx1);
@@ -858,6 +867,12 @@ namespace MHDOp {
 				        predictorRhs, WSph, a_State.m_x_sph_cc[dit],
 				        inputs.velocity_scale);
 			}
+			if (inputs.corotating_frame == 1)
+			{
+				MHD_Rotation::add_rotation_source(
+				        predictorRhs, WCart, a_State.m_x_sph_cc[dit],
+				        inputs.velocity_scale, inputs.solar_angular_velocity());
+			}
 
 			if (inputs.takedivBstep == 1)
 			{
@@ -1024,6 +1039,12 @@ namespace MHDOp {
 				MHD_Gravity::add_gravity_source(
 				        correctorRhs, WPredictorSph,
 				        a_State.m_x_sph_cc[dit], inputs.velocity_scale);
+			}
+			if (inputs.corotating_frame == 1)
+			{
+				MHD_Rotation::add_rotation_source(
+				        correctorRhs, WPredictorCart, a_State.m_x_sph_cc[dit],
+				        inputs.velocity_scale, inputs.solar_angular_velocity());
 			}
 
 			if (inputs.takedivBstep == 1)

@@ -83,6 +83,18 @@ LINK=$(CXX)
 $(TARGET): $(OBJ)
 	$(LINK) -o $(TARGET) $(OBJ) $(LIBS)
 
+# Physics and boundary regression checks; use the same build flags as the solver.
+$(OBJDIR)/rotating_frame_test.o: ../tests/rotating_frame.cpp | $(OBJDIR) $(DEPDIR)
+	$(CXX) -c -o $@ $< $(CXXFLAGS) $(CPPFLAGS)
+	$(DEP) $< $(CPPFLAGS) -MT $@ -MP > $(DEPDIR)/rotating_frame_test.d
+
+$(OBJDIR)/rotating_frame_test.exe: $(filter-out $(OBJDIR)/main.o,$(OBJ)) $(OBJDIR)/rotating_frame_test.o
+	$(LINK) -o $@ $^ $(LIBS)
+
+.PHONY: test-rotation
+test-rotation: $(OBJDIR)/rotating_frame_test.exe
+	$(OBJDIR)/rotating_frame_test.exe
+
 $(OBJDIR):
 	@if [ ! -d "./$(OBJDIR)" ];then     \
 		mkdir -p $(OBJDIR);           \
@@ -105,7 +117,7 @@ $(OBJDIR)/%.o : %.cpp | $(OBJDIR) $(DEPDIR)
 
 print-%: ; @echo $* = $($*)
 
--include $(DEPENDS)
+-include $(DEPENDS) $(DEPDIR)/rotating_frame_test.d
 
 vars:
 	$(foreach v,$(filter-out $(VARS_OLD) VARS_OLD,$(.VARIABLES)), $(info $(v) = $($(v))))

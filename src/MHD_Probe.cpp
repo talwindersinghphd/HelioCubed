@@ -203,6 +203,15 @@ namespace MHD_Probe {
         // longitude_now = longitude_now - 1.792951949248379e+02; // HGI to Carrington
         if (longitude_now < 0.0) longitude_now += 360;
 
+        const double inertial_longitude = longitude_now;
+        if (inputs.corotating_frame == 1)
+        {
+            // The trajectory is inertial; sample it on the rotating grid.
+            longitude_now = fmod(longitude_now -
+                    inputs.solar_angular_velocity()*a_time*180.0/c_PI, 360.0);
+            if (longitude_now < 0.0) longitude_now += 360.0;
+        }
+
         double x_n = sin(latitude_now*c_PI/180)*cos(longitude_now*c_PI/180);
         double y_n = sin(latitude_now*c_PI/180)*sin(longitude_now*c_PI/180);
         double z_n = cos(latitude_now*c_PI/180);
@@ -303,6 +312,15 @@ namespace MHD_Probe {
                 double By = probed_values_primitive[6]*1e6; // microGauss
                 double Bz = probed_values_primitive[7]*1e6; // microGauss
 
+                if (inputs.corotating_frame == 1)
+                {
+                    // Return inertial velocities for comparison with observations.
+                    const double rotation_speed = inputs.solar_angular_velocity()*
+                            r_now*sin(latitude_now*c_PI/180.0)/1e5;
+                    Vx -= rotation_speed*sin(longitude_now*c_PI/180.0);
+                    Vy += rotation_speed*cos(longitude_now*c_PI/180.0);
+                }
+
                 double VR, VT, VN, BR, BT, BN;
 
                 VR = H3_to_RTN_00*Vx + H3_to_RTN_01*Vy + H3_to_RTN_02*Vz;
@@ -317,7 +335,7 @@ namespace MHD_Probe {
                     outputFile << setw(16) << setprecision(12) << physical_time
                     << setw(11) << setprecision(4) << r_now/c_AU		
                     << setw(11) << setprecision(4) << 90-latitude_now
-                    << setw(11) << setprecision(4) << longitude_now
+                    << setw(11) << setprecision(4) << inertial_longitude
                     << setw(11) << setprecision(4) << rho
                     << setw(11) << setprecision(4) << VR
                     << setw(11) << setprecision(4) << VT

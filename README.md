@@ -50,6 +50,23 @@ mpirun -n 8 ./FullSphere.exe inputs
 
 Each domain size must be divisible by `BoxSize`. Polar exchange also requires an even number of azimuthal cells and patches. Available integrators are Euler (1), explicit midpoint RK2 (2), MUSCL–Hancock (3), and classical RK4 (4).
 
+### Co-rotating frame
+
+To evolve in a frame rotating with the Sun, set these options in `exec/inputs`:
+
+```text
+-corotating_frame                1
+-solar_rotation_period           25.38
+```
+
+`corotating_frame` defaults to `0` for the inertial solver. `solar_rotation_period` is the sidereal rotation period in days and defaults to `25.38` when omitted. The same period controls inertial boundary rotation, rotating-frame forces, and probe transformations, with angular velocity `Omega = 2*pi/(solar_rotation_period*86400)` about the positive z axis. In a co-rotating run, boundary maps stay at their supplied longitudes regardless of `BC_frame_rotate`. Multiple maps still interpolate in time using `BC_cadence`; a single map or the final map is held fixed. Time-dependent maps must share a common co-rotating longitude grid.
+
+The momentum source is `rho * [(Omega x r) x Omega + 2 (v x Omega)]`, and the energy source is its work `v . F`. Coriolis does no work, so only the centrifugal contribution enters energy. Sources are included independently of `Sun_gravity` in every Euler/RK evaluation and in both Hancock stages. Coordinates remain in cm; the sources use `Omega / velocity_scale` to match the solver's scaled time and velocities. The Cartesian form avoids divisions by `sin(theta)` at the poles.
+
+Boundary velocities are used as supplied and interpreted in the selected simulation frame. The analytic initial state and analytic inner boundary likewise specify velocities in that frame. For an inertial boundary dataset, convert its azimuthal velocity to `v_phi - Omega*r*sin(theta)` before using it in a co-rotating run. Volume output and checkpoint velocities remain in the simulation frame; restart with the same frame and rotation period. CME input longitudes and velocity components also refer to the simulation frame. Probe trajectories retain their existing inertial longitude convention: sampling accounts for grid rotation, and probe velocities are converted back to inertial values for comparison with observations.
+
+Run the rotation source, boundary interpolation, and probe regression checks with `make -C exec test-rotation`, supplying the same Proto and library paths as for a solver build. Use separate object directories when testing both `TURB=0` and `TURB=1`.
+
 Plot a generated probe file with:
 
 ```sh
