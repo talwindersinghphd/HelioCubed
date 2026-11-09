@@ -1082,9 +1082,8 @@ inline void bertaReconstructLine(
   // passed only to the reconstruction kernels' const input parameters.
   for (unsigned i = 0; i < 6; ++i)
     source[i].m_ptrs[0] = const_cast<T*>(a_source[i]);
-#ifdef __clang__
-#pragma clang loop vectorize(enable)
-#endif
+  // Let the optimizer choose vectorization for each reconstruction method.
+  // Clang cannot honor a forced request for every instantiation of this loop.
   for (int cell = 0; cell < a_size; ++cell)
   {
     if constexpr (METHOD == 0)

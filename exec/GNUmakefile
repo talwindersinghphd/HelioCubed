@@ -96,7 +96,8 @@ LIBS+= -L$(FFTW3_DIR)/lib -lfftw3
 CPPFLAGS+= -I$(FFTW3_DIR)/include
 endif
 
-DEP=$(DEPXX) -MM $(CXXFLAGS)
+# -c tells MPI wrappers to omit linker flags during dependency generation.
+DEP=$(DEPXX) -MM -c $(CXXFLAGS)
 ifeq ($(DEPXX),nvcc)
 DEP=$(DEPXX) -M $(CXXFLAGS)
 LIBS+= -lnvToolsExt

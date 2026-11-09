@@ -8,6 +8,7 @@
 #include <map>
 #include <iostream>  // For std::pout(0), etc.
 #include <iomanip>   // For std::setw, etc.
+#include <limits>
 #include <vector>
 #include <sstream>
 #include <cmath>
@@ -82,8 +83,9 @@ private:
     int Berta_detector_type = 0; // 0: Jameson detector, 1: Berta derivative-ratio detector
     int Berta_fallback_type = 0; // 0: WENO3 fallback, 1: PLM fallback
     double strength; // Strength of perturbation for test problems.
-    int write_cadence = 10000000000; 
-    int slice_cadence = 10000000000;
+    // Default to the largest supported iteration cadence without overflowing int.
+    int write_cadence = std::numeric_limits<int>::max();
+    int slice_cadence = std::numeric_limits<int>::max();
     double write_time_cadence = 1000000000; // In seconds
     double slice_time_cadence = 1000000000; // In seconds
     int checkpoint_cadence = 1000000000;
