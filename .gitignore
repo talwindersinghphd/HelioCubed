@@ -27,6 +27,7 @@ blt
 /Convergence_jobs/
 /Test_jobs/
 /docs/
+/private/
 *.jpeg
 *.png
 *.mpg
