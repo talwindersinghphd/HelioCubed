@@ -463,7 +463,8 @@ public:
                 }
             }
             const double interiorDt=OP::dtCFLSecondOrderHost(
-                grid->state,grid->volume,grid->cflScale.get());
+                grid->state,grid->volume,grid->cflScale.get(),
+                CMEModel::minimumConeBoundaryDensity(ParseInputs::get_CMEs(),time));
             double rate=1/interiorDt;
             if(grid->boundaryInverseWidth>0)
                 rate=CMEModel::boundaryCFLRate(rate,ParseInputs::get_CMEs(),time,
@@ -1839,9 +1840,10 @@ inline bool CubedSphereAMR::insertCME(double time)
         }
         prepareStates(time);
         long long affected = 0;
+        const bool fourthOrderInsertion=fourthOrder() && !source.isCone();
         for (auto* grid : levels()) for (auto index : grid->layout) {
             const Box valid = grid->layout[index];
-            const Box box = fourthOrder() ? valid.grow(1) : valid;
+            const Box box = fourthOrderInsertion ? valid.grow(1) : valid;
             Scalar radius(box), volume(box);
             Vector dr(box), area(box);
             auto& op = grid->op[index];
@@ -1850,8 +1852,8 @@ inline bool CubedSphereAMR::insertCME(double time)
             auto position = forall_p<double,DIM,HOST>(f_cubedSphereMap3,
                 box, radius, op.dx(), 0.5, 0.5, block);
             State delta(box, 0.0), fourth;
-            if (fourthOrder()) fourth = fourthOrderPrimitives(*grid, index);
-            const auto& primitive = fourthOrder() ? fourth : grid->primitive[index];
+            if (fourthOrderInsertion) fourth = fourthOrderPrimitives(*grid, index);
+            const auto& primitive = fourthOrderInsertion ? fourth : grid->primitive[index];
             const double backgroundBx = testProblemBackgroundBx(ParseInputs::get_init_condition_type());
             for (auto point : box) {
                 CMEModel::Sample cme;
@@ -1859,11 +1861,23 @@ inline bool CubedSphereAMR::insertCME(double time)
                     {position(point,0),position(point,1),position(point,2)}, cme)) continue;
                 if (valid.containsPoint(point) && !covered(grid->number, point, block)) ++affected;
                 std::array<double,8> ambient{};
-                ambient[0] = primitive(point,iRHO);
-                ambient[4] = primitive(point,iP);
-                for (int d = 0; d < 3; ++d) {
-                    ambient[1+d] = primitive(point,iVX+d);
-                    ambient[5+d] = primitive(point,iBX+d) + (d == 0 ? backgroundBx : 0);
+                if(source.isCone()) {
+                    // Prescribe the total cone state in conservative cells;
+                    // do not convolve a sharp primitive replacement with a
+                    // fourth-order stencil that can create negative pressure.
+                    LocalFaceState<double> u,w;
+                    for(int component=0;component<8;++component) u(component)=grid->state[index](point,component);
+                    cartesianPrimitiveFromConserved(w,u,1/grid->jacobian[index](point),ParseInputs::get_gamma(),
+                        isConstantMagneticFieldTest(ParseInputs::get_init_condition_type()),backgroundBx);
+                    for(int component=0;component<8;++component) ambient[component]=w(component);
+                    ambient[5]+=backgroundBx;
+                } else {
+                    ambient[0] = primitive(point,iRHO);
+                    ambient[4] = primitive(point,iP);
+                    for (int d = 0; d < 3; ++d) {
+                        ambient[1+d] = primitive(point,iVX+d);
+                        ambient[5+d] = primitive(point,iBX+d) + (d == 0 ? backgroundBx : 0);
+                    }
                 }
                 CMEModel::loadDensity(cme, ambient);
                 const auto change = CMEModel::increment(ambient, cme,
@@ -1872,13 +1886,13 @@ inline bool CubedSphereAMR::insertCME(double time)
                     delta(point,component) = change[component];
             }
             State average;
-            if (fourthOrder())
+            if (fourthOrderInsertion)
                 average = (1.0*Shift::Zeros() + (1.0/24)*Stencil<double>::Laplacian())(delta, valid);
             const auto& jacobian = grid->jacobian[index];
             for (auto point : valid) for (int component = 0; component < NUMCOMPS; ++component) {
                 double increment = jacobian(point) *
-                    (fourthOrder() ? average(point,component) : delta(point,component));
-                if (fourthOrder()) for (int d = 0; d < DIM; ++d) {
+                    (fourthOrderInsertion ? average(point,component) : delta(point,component));
+                if (fourthOrderInsertion) for (int d = 0; d < DIM; ++d) {
                     const auto e = Point::Basis(d);
                     increment += (jacobian(point+e) - jacobian(point-e)) *
                         (delta(point+e,component) - delta(point-e,component)) / 48;

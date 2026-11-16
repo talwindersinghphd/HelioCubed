@@ -32,7 +32,8 @@ struct CalendarEpoch
     }
 };
 
-// Date strings keep whole seconds exactly. Decimal years also bypass the
+// UTC dates use YYYY-MM-DDTHH:MM:SS[.fraction][Z]; an omitted Z still means UTC.
+// Keep DD-MM-YYYY dates for existing inputs. Decimal years also bypass the
 // shared parser's float conversion. A zero epoch retains the startup sentinel.
 inline CalendarEpoch parseCalendarEpoch(const std::string& a_raw, const char* a_name)
 {
@@ -43,7 +44,8 @@ inline CalendarEpoch parseCalendarEpoch(const std::string& a_raw, const char* a_
     auto invalid = [&]() -> std::invalid_argument
     {
         return std::invalid_argument(std::string(a_name)
-            + " must be a finite decimal year in [1, 10000), 0, or a valid UTC date (DD-MM-YYYYTHH:MM:SS).");
+            + " must be a valid UTC date (YYYY-MM-DDTHH:MM:SSZ; fractional seconds and an omitted Z are allowed), "
+              "a finite decimal year in [1, 10000), or 0.");
     };
     if (value.find('T') == std::string::npos)
     {
@@ -58,8 +60,12 @@ inline CalendarEpoch parseCalendarEpoch(const std::string& a_raw, const char* a_
         }
         catch (const std::exception&) { throw invalid(); }
     }
-    if (value.size() != 19 || value[2] != '-' || value[5] != '-'
-        || value[10] != 'T' || value[13] != ':' || value[16] != ':') throw invalid();
+    if (value.back() == 'Z') value.pop_back();
+    if (value.size() < 19 || value[10] != 'T' || value[13] != ':' || value[16] != ':')
+        throw invalid();
+    const bool yearFirst = value[4] == '-' && value[7] == '-';
+    const bool dayFirst = value[2] == '-' && value[5] == '-';
+    if (!yearFirst && !dayFirst) throw invalid();
     auto digits = [&](int start, int count)
     {
         int number = 0;
@@ -70,14 +76,26 @@ inline CalendarEpoch parseCalendarEpoch(const std::string& a_raw, const char* a_
         }
         return number;
     };
-    int day = digits(0, 2), month = digits(3, 2), year = digits(6, 4);
+    int year = digits(yearFirst ? 0 : 6, 4);
+    int month = digits(yearFirst ? 5 : 3, 2), day = digits(yearFirst ? 8 : 0, 2);
     int hour = digits(11, 2), minute = digits(14, 2), second = digits(17, 2);
     if (year < 1 || month < 1 || month > 12 || day < 1
         || day > calendarMonthDays(year, month) || hour > 23
         || minute > 59 || second > 59) throw invalid();
+    long double fraction = 0;
+    if (value.size() > 19)
+    {
+        if (value[19] != '.' || value.size() == 20) throw invalid();
+        long double place = 0.1L;
+        for (size_t i = 20; i < value.size(); ++i, place *= 0.1L)
+        {
+            if (value[i] < '0' || value[i] > '9') throw invalid();
+            fraction += (value[i]-'0')*place;
+        }
+    }
     int dayOfYear = day-1;
     for (int m = 1; m < month; ++m) dayOfYear += calendarMonthDays(year, m);
-    return {year, dayOfYear*86400.0L + hour*3600 + minute*60 + second};
+    return {year, dayOfYear*86400.0L + hour*3600 + minute*60 + second + fraction};
 }
 
 inline double secondsBetweenEpochs(const CalendarEpoch& a_start, const CalendarEpoch& a_end)
@@ -121,7 +139,7 @@ inline std::string formatUTCEpoch(CalendarEpoch a_epoch)
         ++month;
     }
     char output[64];
-    std::snprintf(output, sizeof(output), "%04d-%02d-%02dT%02d:%02d:%02d UTC",
+    std::snprintf(output, sizeof(output), "%04d-%02d-%02dT%02d:%02d:%02dZ",
         a_epoch.year, month, day+1, clock/3600, (clock%3600)/60, clock%60);
     return output;
 }

@@ -55,10 +55,17 @@ def decimal_datetime(epoch):
 
 
 def start_datetime(raw):
+    raw = raw.split("#", 1)[0].strip()
     try:
         return decimal_datetime(float(raw))
-    except ValueError:
-        return dt.datetime.strptime(raw, "%d-%m-%YT%H:%M:%S").replace(tzinfo=dt.timezone.utc)
+    except (ValueError, OverflowError):
+        pass
+    # Keep existing day-first inputs readable; all new dates use ISO UTC.
+    if re.fullmatch(r"[0-9]{2}-[0-9]{2}-[0-9]{4}T.*", raw):
+        raw = raw[6:10] + "-" + raw[3:5] + "-" + raw[:2] + raw[10:]
+    if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z?", raw):
+        return dt.datetime.fromisoformat(raw.rstrip("Z")).replace(tzinfo=dt.timezone.utc)
+    raise ValueError("Start time must use YYYY-MM-DDTHH:MM:SSZ (UTC), or a decimal year")
 
 
 def trajectory_position(path, dates, equatorial=False):

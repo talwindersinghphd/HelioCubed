@@ -192,6 +192,30 @@ inline State CubedSphereAMR::fourthOrderPrimitives(const GridLevel& grid,const M
     State point=(1.0*Shift::Zeros()-(1.0/24)*Stencil<double>::Laplacian())((*grid.cartesian)[index],box);
     State result(box);
     const bool magnetic=isConstantMagneticFieldTest(ParseInputs::get_init_condition_type());
+    // A sharp cone boundary can have positive conserved averages but an
+    // inadmissible deconvolved point state. Recover the complete donor state
+    // for plots, probes and tags. If the mapped-to-Cartesian average correction
+    // also overshoots, use the stored JU/J in owned cells. Never clip pressure
+    // while retaining an inconsistent velocity. Stored averages are unchanged.
+    const double gamma=ParseInputs::get_gamma();
+    const double b0=testProblemBackgroundBx(ParseInputs::get_init_condition_type());
+    const auto& cell=(*grid.cartesian)[index];
+    const auto& stored=grid.preparedState ? (*grid.preparedState)[index] : grid.state[index];
+    auto admissible=[&](const State& u,const Point& p) {
+        for(int component=0;component<NUMCOMPS;++component)
+            if(!std::isfinite(u(p,component))) return false;
+        if(u(p,iRHO)<RHO00) return false;
+        double thermal=u(p,iE)+(magnetic ? c_TEST_P0/(gamma-1) : 0);
+        for(int d=0;d<DIM;++d) thermal-=.5*u(p,iMOMX+d)*u(p,iMOMX+d)/u(p,iRHO)
+            +u(p,iBX+d)*u(p,iBX+d)/(8*M_PI);
+        if(magnetic) thermal-=b0*u(p,iBX)/(4*M_PI);
+        return std::isfinite(thermal) && thermal>=0;
+    };
+    for(auto p : box) if(!admissible(point,p)) {
+        const bool mappedFallback=grid.layout[index].containsPoint(p) && !admissible(cell,p);
+        for(int component=0;component<NUMCOMPS;++component)
+            point(p,component)=mappedFallback ? stored(p,component)/grid.jacobian[index](p) : cell(p,component);
+    }
     forallInPlace([] PROTO_LAMBDA(Var<double,NUMCOMPS,HOST>& out,const Var<double,NUMCOMPS,HOST>& in,
         double gamma,bool magnetic,double b0)
     {cartesianPrimitiveFromConserved(out,in,1.0,gamma,magnetic,b0);},box,result,point,

@@ -879,11 +879,12 @@ template<typename T, typename MAP, MemType MEM>
 inline T BoxOp_EulerCubedSphere<T,MAP,MEM>::
 dtCFL(MBLevelBoxData<T,NUMCOMPS,MEM>& a_JU,
       MBInterpOp& a_iop,
-      MBLevelBoxData<T,1,MEM>& a_dVolr)
+      MBLevelBoxData<T,1,MEM>& a_dVolr,
+      T coneBoundaryDensity)
 {
   PR_TIMERS("BoxOp_EulerCubedSphere::dtCFL()");
   if constexpr (MEM == HOST)
-    if (usesSecondOrderPrimitives()) return dtCFLSecondOrderHost(a_JU,a_dVolr);
+    if (usesSecondOrderPrimitives()) return dtCFLSecondOrderHost(a_JU,a_dVolr,nullptr,coneBoundaryDensity);
   auto layout = a_JU.layout();
   
   auto& geometry = levelGeometry(layout);
@@ -1233,10 +1234,13 @@ inline void BoxOp_EulerCubedSphere<T,MAP,MEM>::Insert_CME(
     PR_TIME("BoxOp_EulerCubedSphere::Insert_CME()");
     auto& operators = *levelGeometry(layout).op;
 
-    if (ParseInputs::get_spatial_order() == 2) {
+    // Cone boundaries are discontinuities. Prescribe conservative cell states
+    // directly at either evolution order: a fourth-order primitive projection
+    // can subtract too much thermal energy across a density/velocity jump.
+    if (ParseInputs::get_spatial_order() == 2 || cme.isCone()) {
         long long affected = 0;
         double addedMass = 0, baselineMass = 0, backgroundMass = 0, maxVa2 = 0;
-        double minAdded = std::numeric_limits<double>::infinity(), maxAdded = 0;
+        double minAdded = std::numeric_limits<double>::infinity(), maxAdded = -minAdded;
         for (auto index : layout) {
             const Box valid = layout[index];
             auto& op = operators[index];
@@ -1267,6 +1271,17 @@ inline void BoxOp_EulerCubedSphere<T,MAP,MEM>::Insert_CME(
                 }
                 ambient[4] = std::max(0.,
                     (conserved(point,iE) / jacobian - kinetic - magnetic) * (gamma - 1));
+                if(cme.isCone()) {
+                    HelioCubed::LocalFaceState<T> u,w;
+                    for(int component=0;component<8;++component) u(component)=conserved(point,component);
+                    const bool magneticTest=isConstantMagneticFieldTest(ParseInputs::get_init_condition_type());
+                    const T background=magneticTest ? testProblemBackgroundBx(ParseInputs::get_init_condition_type()) : T(0);
+                    HelioCubed::cartesianPrimitiveFromConserved(w,u,T(1)/jacobian,T(gamma),magneticTest,background);
+                    for(int component=0;component<8;++component) ambient[component]=w(component);
+                    ambient[5]+=background;
+                    totalFieldSquared=0;
+                    for(int d=0;d<3;++d) totalFieldSquared+=ambient[5+d]*ambient[5+d];
+                }
                 const double cellVolume = jacobian * dx[0] * dx[1] * dx[2];
                 baselineMass += source.density * cellVolume;
                 backgroundMass += ambient[0] * cellVolume;
@@ -1277,11 +1292,11 @@ inline void BoxOp_EulerCubedSphere<T,MAP,MEM>::Insert_CME(
                     conserved(point,component) += jacobian * change[component];
 
                 ++affected;
-                addedMass += source.density * cellVolume;
-                minAdded = std::min(minAdded, source.density);
-                maxAdded = std::max(maxAdded, source.density);
+                addedMass += change[0] * cellVolume;
+                minAdded = std::min(minAdded, change[0]);
+                maxAdded = std::max(maxAdded, change[0]);
                 maxVa2 = std::max(maxVa2,
-                    totalFieldSquared / (4 * M_PI * (ambient[0] + source.density)));
+                    totalFieldSquared / (4 * M_PI * CMEModel::totalDensity(ambient,source)));
             }
         }
 #ifdef PR_MPI
@@ -1298,11 +1313,11 @@ inline void BoxOp_EulerCubedSphere<T,MAP,MEM>::Insert_CME(
             return;
         }
         pout(0) << std::setprecision(17)
-            << "CME positive-energy insertion: cells " << affected
-            << ", added mass " << addedMass << " g" << std::endl;
-        pout(0) << "CME automatic density loading: baseline mass " << baselineMass
+            << (cme.isCone() ? "CME cone total-plasma insertion: cells " : "CME positive-energy insertion: cells ") << affected
+            << ", net mass change " << addedMass << " g" << std::endl;
+        pout(0) << (cme.isCone() ? "CME cone prescribed plasma: target mass " : "CME automatic density loading: baseline mass ") << baselineMass
             << " g, max vA " << std::sqrt(maxVa2)/1e5 << " km/s"
-            << ", added n range [" << minAdded/c_MP << ", " << maxAdded/c_MP << "] cm^-3"
+            << ", density change range [" << minAdded/c_MP << ", " << maxAdded/c_MP << "] cm^-3"
             << ", enclosed background mass " << backgroundMass << " g"
             << std::setprecision(6) << std::endl;
         return;
@@ -1341,7 +1356,7 @@ inline void BoxOp_EulerCubedSphere<T,MAP,MEM>::Insert_CME(
                 ambient[5+d] += basis(p,d,q) * point(p,iBX+q);
             }
             CMEModel::loadDensity(source, ambient);
-            point(p,iRHO) = ambient[0] + source.density;
+            point(p,iRHO) = CMEModel::totalDensity(ambient,source);
             point(p,iP) = CMEModel::thermalPressure(ambient, source, cme.plasmaBeta);
             for (int d = 0; d < 3; ++d) {
                 point(p,iVX+d) = point(p,iBX+d) = 0;

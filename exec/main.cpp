@@ -374,7 +374,8 @@ int main(int argc, char *argv[])
       const double stepCFL = cmeSchedule.cfl(time, ParseInputs::get_CFL(),riemannSolver==2 ? .5 : 1.);
       if (convTestType == 0)
         {
-          double dtcfl1 = OP::dtCFL(JU,iop,dVolrLev);
+          double dtcfl1 = OP::dtCFL(JU,iop,dVolrLev,
+              CMEModel::minimumConeBoundaryDensity(ParseInputs::get_CMEs(),time));
           dt = dtcfl1*stepCFL;
           const double interiorRate = 1./dtcfl1;
           const double boundaryRate = CMEModel::boundaryCFLRate(interiorRate,

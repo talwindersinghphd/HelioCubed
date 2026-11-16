@@ -27,9 +27,9 @@
 # Total radial cells across the shell.
 -thickness                      150
 # Angular cells per MPI patch; divides domainSize.
--boxSize_nonrad                 30
+-boxSize_nonrad                 60
 # Radial cells per MPI patch; divides thickness.
--boxSize_rad                    30
+-boxSize_rad                    150
 # Inner shell radius (cm).
 -inner_radius                   1.4964e12
 # Outer shell radius (cm); must exceed inner_radius.
@@ -78,8 +78,9 @@
 -max_iter                       100000
 # Maximum elapsed simulation time (s), including time before a restart.
 -max_time                       360000.0
-# Calendar start epoch (UTC): decimal year or DD-MM-YYYYTHH:MM:SS.
--BC_start_time                  16-03-2024T12:00:00
+# Calendar start epoch (UTC): YYYY-MM-DDTHH:MM:SSZ; Z means UTC.
+# Omitting Z still means UTC. Decimal years remain supported.
+-BC_start_time                  2024-03-16T12:00:00Z
 
 # === Divergence control and artificial viscosity ===
 
@@ -174,7 +175,8 @@
 -BC_file                        ../scripts/psi_eclipse24_swig_wsa2_smth5_bc_r21_5_corotating_Bp_two_frames.h5
 # Time between successive boundary frames (hours).
 -BC_cadence                     1.0
-# Apply solar rotation to boundary frames: 0=off, 1=on.
+# Input-frame convention: 0=fixed longitude grid, 1=rotating frames.
+# Both modes apply solar rotation; 1 adds frame-dependent rotation offsets.
 -BC_frame_rotate                0
 # Frame selection: 0=use all available frames, 1=use only the first.
 -BC_force_single_frame          0
@@ -213,7 +215,7 @@
 # Number of recent checkpoints targeted for retention.
 -max_checkpoint_files           3
 # Uncomment to resume from this checkpoint instead of initializing.
-#-restart_file                  checkpoint_amr_600.amr
+#-restart_file                  checkpoint_500_b.hdf5
 
 # === Trajectory probes ===
 
@@ -239,49 +241,222 @@
 # Maximum midpoint-quadrature step along each ray (AU); check LOS convergence.
 #-Jmap_los_step                  0.001
 #-jmap0.observer                 trajStereoA.dat
-#-jmap0.reference                trajEarth.dat
+#-jmap0.reference                trajEarth
 #-jmap0.filename                 StereoA_jmap.csv
 # Make plots and running differences with scripts/synthetic_jmap.py.
 
-# === GCS CMEs ===
+# === CME shapes and insertion ===
 
-# Example fit; replace these values with measurements for the event.
-# Set num_CMEs=0 for solar wind only. Repeat CME1.*, CME2.*, ... for more events.
-# Checkpoints retain insertion state to prevent duplicate CMEs on restart.
+# Enable ONLY one model block below. Each block contains its type, geometry,
+# insertion and plasma settings (plus taper for types 1-3 and 5). DBM settings are shared below.
+# To switch, comment out the current model lines and copy/uncomment the matching
+# template (remove the # from #-option lines). Edit values for your event.
+# For more CMEs, copy the CME0.DBM_* settings AND the selected model block,
+# change CME0. to CME1., CME2., ... and increase num_CMEs accordingly.
+# Checkpoints retain insertion state; keep source ordering unchanged on restart.
+
+# --- Source count ---
+
+# Number of indexed sources. For solar wind only, set 0 AND comment out all CME*.* lines.
 -num_CMEs                       1
-# CME geometry: 0=disabled, 1=regular normal-section FRiED (default), 2=GCS with smooth joins.
-# Both use the same GCS/DBM/flux inputs. Type 2 preserves the fitted aspect ratio.
-# Type 2 rejects overlapping sections instead of adjusting the geometry.
--CME0.CME_type                  1
-# Injection: "volume" (default) with boundary leg feeding, or "boundary" emergence.
-# Boundary emergence requires spatial_order=2 and spatial_operator=1;
--CME0.CME_injection_method      volume
-# Smoothly fade boundary B, added density and excess velocity to WSA over this
-# many seconds after insertion (default 43200 = 12 hours). 0 disables volume leg feeding.
--CME0.CME_boundary_taper_time    43200
-# GCS leading-edge speed (km/s), final fitted height (solar radii), and UTC epoch.
--CME0.GCS_speed                  900
--CME0.GCS_fit_height             15
--CME0.GCS_fit_time               17-03-2024T12:00:00
-# GCS latitude, Stonyhurst longitude, tilt, half angle (degrees), and aspect ratio.
--CME0.GCS_latitude               0
--CME0.GCS_longitude              0
--CME0.GCS_tilt                   0
--CME0.GCS_half_angle             40
--CME0.GCS_aspect_ratio           0.5
-# DBM drag (km^-1), ambient wind (km/s), and reference leading height (solar radii).
+# Model: 0=disable this source, 1=FRiED, 2=GCS, 3=deformed GCS,
+#        4=cone, 5=deformed cone.
+
+# --- Common settings: drag-based propagation (DBM) ---
+
+# Drag coefficient (km^-1); 0 gives constant-speed propagation.
 -CME0.DBM_gamma                  1e-8
+# Ambient solar-wind speed for the DBM (km/s).
 -CME0.DBM_wind_speed             450
+# Reference leading radius in solver solar radii (1 Rsun = 696000 km).
+# Must be >= the fitted leading radius, and above the inner boundary for surface insertion.
+# Types 1-3 and 5 use this as their reference size, followed by homologous DBM expansion.
+# Type 4 uses DBM to reach the inner boundary, then passes a finite sphere at
+# that entry speed; this radius places its volume snapshot, without stretching the sphere.
 -CME0.DBM_target_height          70
-# Positive measured fluxes (Mx); negative or omitted values use empirical estimates.
--CME0.CME_poloidal_flux          -1
--CME0.CME_toroidal_flux          -1
--CME0.CME_leading_polarity       1
--CME0.CME_helicity_sign          1
-# Minimum added density [g/cm^3]. Loading automatically increases it where needed
-# to keep the initial/inflow Alfven speed <= four times the local radial driver speed.
--CME0.CME_density                1.38e-23
-# Optional added pressure / rope magnetic pressure; default 0 preserves ambient temperature.
-# -CME0.CME_plasma_beta          0
-# Earth trajectory for the Stonyhurst-to-simulation longitude conversion.
--CME0.GCS_earth_trajectory       trajEarth.dat
+
+# --- Model 1: FRiED ---
+
+#-CME0.CME_type                  1
+
+# FRiED is constructed from a GCS fit, so its input names are GCS_* too.
+# It may thin the tube to prevent overlapping normal sections.
+# Measured leading-edge speed (km/s), height (solver Rsun), and fit time (UTC).
+# Time format: YYYY-MM-DDTHH:MM:SSZ. Use an earlier BC_start_time for full surface emergence.
+#-CME0.GCS_speed                  900
+#-CME0.GCS_fit_height             15
+#-CME0.GCS_fit_time               2024-03-17T12:00:00Z
+# Latitude, Stonyhurst longitude, tilt, half-angle (degrees), and aspect ratio kappa.
+#-CME0.GCS_latitude               0
+#-CME0.GCS_longitude              0
+#-CME0.GCS_tilt                   0
+#-CME0.GCS_half_angle             40
+#-CME0.GCS_aspect_ratio           0.5
+# Positive measured fluxes (Mx); -1/omitted uses empirical estimates.
+#-CME0.CME_poloidal_flux          -1
+#-CME0.CME_toroidal_flux          -1
+# Magnetic signs: each must be +1 or -1.
+#-CME0.CME_leading_polarity       1
+#-CME0.CME_helicity_sign          1
+# Earth trajectory for Stonyhurst-to-simulation longitude conversion at the fit epoch.
+#-CME0.GCS_earth_trajectory       trajEarth
+
+# Insertion: volume or surface (boundary is an alias for surface).
+# Surface insertion and boundary feeding require spatial_order=2, spatial_operator=1.
+#-CME0.CME_injection_method      surface
+# Total boundary duration (s): full strength for the first half, smooth fade for the second.
+# >0 for surface; 0 disables volume boundary feeding. Timing starts at insertion/emergence.
+#-CME0.CME_boundary_taper_time    43200
+# Minimum ADDED density (g/cm^3); magnetic loading may increase it.
+#-CME0.CME_density               1.38e-23
+# Added-plasma temperature (K); 0 uses the local ambient temperature.
+#-CME0.CME_temperature           0
+# Extra pressure / CME magnetic pressure (dimensionless).
+#-CME0.CME_plasma_beta           0
+
+# --- Model 2: GCS ---
+
+#-CME0.CME_type                  2
+
+# Smoothed GCS preserves the fitted aspect ratio; overlapping sections are rejected.
+# Require kappa < sin(half-angle), with the angle interpreted in degrees.
+# Measured leading-edge speed (km/s), height (solver Rsun), and fit time (UTC).
+# Time format: YYYY-MM-DDTHH:MM:SSZ. Use an earlier BC_start_time for full surface emergence.
+#-CME0.GCS_speed                 900
+#-CME0.GCS_fit_height            15
+#-CME0.GCS_fit_time              2024-03-17T12:00:00Z
+# Latitude, Stonyhurst longitude, tilt, half-angle (degrees), and aspect ratio kappa.
+#-CME0.GCS_latitude              0
+#-CME0.GCS_longitude             0
+#-CME0.GCS_tilt                  0
+#-CME0.GCS_half_angle            40
+#-CME0.GCS_aspect_ratio          0.5
+# Positive measured fluxes (Mx); -1/omitted uses empirical estimates.
+#-CME0.CME_poloidal_flux         -1
+#-CME0.CME_toroidal_flux         -1
+# Magnetic signs: each must be +1 or -1.
+#-CME0.CME_leading_polarity      1
+#-CME0.CME_helicity_sign         1
+# Earth trajectory for Stonyhurst-to-simulation longitude conversion at the fit epoch.
+#-CME0.GCS_earth_trajectory      trajEarth
+
+# Insertion: volume or surface (boundary is an alias for surface).
+# Surface insertion and boundary feeding require spatial_order=2, spatial_operator=1.
+#-CME0.CME_injection_method      surface
+# Total boundary duration (s): full strength for the first half, smooth fade for the second.
+# >0 for surface; 0 disables volume boundary feeding. Timing starts at insertion/emergence.
+#-CME0.CME_boundary_taper_time    43200
+# Minimum ADDED density (g/cm^3); magnetic loading may increase it.
+#-CME0.CME_density               1.38e-23
+# Added-plasma temperature (K); 0 uses the local ambient temperature.
+#-CME0.CME_temperature           0
+# Extra pressure / CME magnetic pressure (dimensionless).
+#-CME0.CME_plasma_beta           0
+
+# --- Model 3: deformed GCS ---
+
+#-CME0.CME_type                  3
+
+# Export shapes AND magnetic field from dGCS; both JSON files must be from the SAME member.
+# shape.json supplies the fit time (epoch_utc), geometry, deformation and orientation.
+# magnetic_field.json supplies fluxes, winding and magnetic signs; do not add separate
+# CME_poloidal_flux, CME_toroidal_flux, CME_leading_polarity or CME_helicity_sign lines.
+# No separate fit-time input, NPZ/VTK files or sampled field lines are needed.
+# Paths are relative to the directory from which you launch, or may be absolute.
+#-CME0.CME_shape_file            test_GCS_shape.json
+#-CME0.CME_magnetic_file         test_magnetic_field.json
+# Leading-radius speed at the exported fit epoch (km/s).
+#-CME0.CME_speed                 900
+# Earth trajectory for Stonyhurst-to-simulation longitude conversion at the export epoch.
+#-CME0.CME_earth_trajectory      trajEarth
+
+# Insertion: volume or surface (boundary is an alias for surface).
+# Surface insertion and boundary feeding require spatial_order=2, spatial_operator=1.
+#-CME0.CME_injection_method      surface
+# Total boundary duration (s): full strength for the first half, smooth fade for the second.
+# >0 for surface; 0 disables volume boundary feeding. Timing starts at insertion/emergence.
+#-CME0.CME_boundary_taper_time    43200
+# Minimum ADDED density (g/cm^3); magnetic loading may increase it.
+#-CME0.CME_density               1.38e-23
+# Added-plasma temperature (K); 0 uses the local ambient temperature.
+#-CME0.CME_temperature           0
+# Extra pressure / CME magnetic pressure (dimensionless).
+#-CME0.CME_plasma_beta           0
+
+# --- Model 4: cone ---
+
+#-CME0.CME_type                  4
+
+# ENLIL-style finite spherical plasma cloud from the fitted cone parameters.
+# No intrinsic CME B is added; the ambient magnetic field is retained.
+# Fitted nose height in nominal solar radii (1 Rsun = 695700 km).
+#-CME0.Cone_height               15
+# Maximum angular half-width of the boundary footprint, latitude and Stonyhurst longitude (degrees).
+#-CME0.Cone_half_angle           35
+#-CME0.Cone_latitude             0
+#-CME0.Cone_longitude            0
+# Fit time (UTC) and leading-radius speed at that time (km/s).
+# Time format: YYYY-MM-DDTHH:MM:SSZ. Use an earlier BC_start_time for full surface emergence.
+#-CME0.CME_fit_time              2024-03-17T12:00:00Z
+#-CME0.CME_speed                 900
+# Earth trajectory for Stonyhurst-to-simulation longitude conversion at the fit epoch.
+#-CME0.CME_earth_trajectory      trajEarth
+# No JSON files, fluxes or magnetic-sign inputs for this model.
+
+# Insertion: volume or surface (boundary is an alias for surface).
+# Surface insertion and boundary feeding require spatial_order=2, spatial_operator=1.
+#-CME0.CME_injection_method      surface
+# ENLIL-style TOTAL cloud plasma at the inner boundary: n = n_ref * density_factor;
+# T = T_ref * temperature_factor. Defaults give n=800 cm^-3 and T=1.5e6 K.
+# Reference fast-wind proton number density (cm^-3) and temperature (K).
+#-CME0.Cone_reference_density    200
+#-CME0.Cone_reference_temperature 1.5e6
+# Positive multipliers of the reference density and temperature.
+#-CME0.Cone_density_factor       4
+#-CME0.Cone_temperature_factor   1
+# Keep beta=0: a cone has no intrinsic CME magnetic pressure.
+#-CME0.CME_plasma_beta           0
+# Do not supply the rope inputs CME_density or CME_temperature for cones.
+# The finite cloud carries uniform n, T and radial speed while crossing the boundary.
+# Each boundary patch returns to the background after the actual trailing edge.
+# Do not set CME_boundary_taper_time for type 4; its passage is geometric.
+
+# The spherical cloud radius is r_inner*sin(half-angle); its passage lasts
+# 2*cloud_radius/entry_speed. Its size is fixed during boundary injection.
+
+# --- Model 5: deformed cone ---
+
+-CME0.CME_type                  5
+
+# Export the cone shape from dGCS. shape.json supplies fit time (epoch_utc),
+# geometry, deformation and orientation; no separate fit-time input is needed.
+# No intrinsic CME B is added; the ambient magnetic field is retained.
+# Paths are relative to the directory from which you launch, or may be absolute.
+-CME0.CME_shape_file            test_Cone_shape.json
+# Leading-radius speed at the exported fit epoch (km/s); the shape follows homologous DBM expansion.
+-CME0.CME_speed                 900
+# Earth trajectory for Stonyhurst-to-simulation longitude conversion at the export epoch.
+-CME0.CME_earth_trajectory      trajEarth
+# No magnetic file, fluxes or magnetic-sign inputs for this model.
+
+# Insertion: volume or surface (boundary is an alias for surface).
+# Surface insertion and boundary feeding require spatial_order=2, spatial_operator=1.
+-CME0.CME_injection_method      surface
+# Total boundary duration (s): full strength for the first half, quintic fade for the second.
+# Timing starts at insertion/emergence; it does not measure the geometric halfway point.
+# Zero disables volume boundary feeding; surface insertion requires a positive value.
+-CME0.CME_boundary_taper_time    43200
+# ENLIL-style TOTAL cloud plasma at the inner boundary: n = n_ref * density_factor;
+# T = T_ref * temperature_factor. Defaults give n=800 cm^-3 and T=1.5e6 K.
+# Reference fast-wind proton number density (cm^-3) and temperature (K).
+-CME0.Cone_reference_density    200
+-CME0.Cone_reference_temperature 1.5e6
+# Positive multipliers of the reference density and temperature.
+-CME0.Cone_density_factor       4
+-CME0.Cone_temperature_factor   1
+# Keep beta=0: a cone has no intrinsic CME magnetic pressure.
+-CME0.CME_plasma_beta           0
+# Do not supply the rope inputs CME_density or CME_temperature for cones.
+# Type 5 retains the exported shape, rooted homologous expansion, and boundary taper.
+# At the boundary, total density and pressure blend back to the background with
+# the taper weight. Volume insertion uses n~r^-3, T~r^(-3*(gamma-1)), and v=V_lead*r/H.

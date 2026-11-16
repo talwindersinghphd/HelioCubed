@@ -2,6 +2,7 @@
 
 #include "MHD_Constants.H"
 #include "MHD_Time.H"
+#include "MHD_ImportedCME.H"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -451,13 +452,15 @@ class Tube {
 
 // ------------------------- GCS input conversion -------------------------
 
-// All inputs are GCS observations; these derived quantities stay internal.
+// Geometry, propagation, and model-specific plasma prescriptions.
 struct CMEParameters {
     int sourceIndex = 0;
-    int fieldModel = 1;      // CME_type: 1 = normal-section FRiED, 2 = GCS.
+    int fieldModel = 1;      // 1=FRiED, 2=GCS, 3=exported GCS, 4=cone, 5=exported cone.
     int injectionMethod = 0; // 0 = volume + leg feeding, 1 = boundary emergence.
     CTFRNormal::Axis normalAxis;
     GCSTube::Tube gcsTube;
+    std::shared_ptr<const ImportedCME::Model> imported;
+    double importedScale = 1; // Reference insertion size / exported fitted size.
 
     double insertionTime = 0; // Start of the source, seconds after BC_start_time.
     double referenceTime = 0; // Epoch at which the apex is at r1 + r0.
@@ -475,10 +478,26 @@ struct CMEParameters {
     double pol_flux_control = 0;       // Constant field-line turn rate [AU^-1].
     double a1 = 0;                     // Reference apex axial field strength [G].
     double helicity_sign = 1;
-    double density = 0;    // Minimum added source density [g/cm^3].
-    double plasmaBeta = 0; // Added thermal / CME magnetic pressure; 0 retains ambient T.
-    double boundaryTaperTime = 43200; // Seconds after insertion until only WSA remains; 0 disables feeding.
+    double density = 0;    // Ropes: minimum added rho; cones: total inner-boundary rho [g/cm^3].
+    double plasmaBeta = 0; // Extra thermal / CME magnetic pressure; zero for cones.
+    double temperature = 0; // Ropes: added-plasma T (0=ambient); cones: total boundary T [K].
+    double coneReferenceDensity = 200; // Fast-wind proton number density [cm^-3].
+    double coneReferenceTemperature = 1.5e6; // Fast-wind temperature [K].
+    double coneDensityFactor = 4, coneTemperatureFactor = 1;
+    double plasmaReferenceHeight = 0; // Type 5: inner-boundary reference [solver Rsun].
+    double plasmaGamma = 5./3; // Type 5: adiabatic index for its expanding volume profile.
+    double cloudEntryTime = 0, cloudEndTime = 0; // Finite cone passage, seconds after BC_start_time.
+    double cloudSpeed = 0; // Uniform radial injection speed at the inner boundary [km/s].
+    double cloudSphereRadius = 0; // Type 4 only: spherical cloud radius [cm].
+    double cloudEntryShift = 0, cloudReferenceShift = 0, cloudShift = 0; // Translation along cone axis [cm].
+    ImportedCME::Vec cloudAxis{}; // Simulation-frame reference cone axis.
+    double boundaryTaperTime = 43200; // Total boundary duration [s]: full first half, fade second half; 0 disables feeding.
+
+    bool isCone() const { return fieldModel == 4 || fieldModel == 5; }
+    bool usesFiniteCloud() const { return fieldModel == 4; }
 };
+
+namespace CMEModel { inline void prepareConeCloud(CMEParameters& source,double innerRsun); }
 
 // Native GCS inputs -> selected CME geometry. Uses the solver's 696000 km solar
 // radius consistently. Fluxes are Mx; speeds km/s; DBM gamma km^-1; angles deg.
@@ -505,15 +524,15 @@ struct Result {
     bool estimatedPoloidal = false, estimatedToroidal = false;
 };
 
-inline CalendarEpoch parseFitTime(std::string raw) {
-    // Also accept the ISO and YYYY/MM/DDTHH:MM forms used in GCS fitting files.
-    if (raw.size() == 16 && raw[10] == 'T')
-        raw += ":00";
-    if (raw.size() == 19 && raw[10] == 'T' && (raw[4] == '-' || raw[4] == '/'))
-        raw = raw.substr(8, 2) + "-" + raw.substr(5, 2) + "-" + raw.substr(0, 4) + raw.substr(10);
-    auto result = parseCalendarEpoch(raw, "GCS_fit_time");
+inline CalendarEpoch parseFitTime(std::string raw, const char* name = "GCS_fit_time") {
+    // The common reader handles ISO UTC dates. Retain older fitting-file forms
+    // YYYY/MM/DDTHH:MM[:SS] and minute-only timestamps as compatibility inputs.
+    const size_t end = raw.size() - (!raw.empty() && raw.back() == 'Z' ? 1 : 0);
+    if (end == 16 && raw[10] == 'T') raw.insert(16, ":00");
+    if (raw.size() >= 19 && raw[4] == '/' && raw[7] == '/') raw[4] = raw[7] = '-';
+    auto result = parseCalendarEpoch(raw, name);
     if (!result.year)
-        throw std::invalid_argument("GCS_fit_time must specify an actual UTC epoch");
+        throw std::invalid_argument(std::string(name) + " must specify an actual UTC epoch");
     return result;
 }
 
@@ -843,6 +862,41 @@ inline Result convert(const Input &in, CalendarEpoch start, double innerRsun) {
     result.domainOuterFlux = result.toroidalFlux * fluxRatio(c, innerRsun, b, 1);
     return result;
 }
+// A dGCS field is already flux-normalized on the complete material rope. Keep
+// that normalization; do not run the FRiED/domain-clipped flux conversion.
+inline Result convertImported(const Input& in,std::shared_ptr<ImportedCME::Model> model,
+                              CalendarEpoch start,double innerRsun) {
+    if(in.cmeType<3 || in.cmeType>5 || !start.year || !model->fitEpoch.year || !(innerRsun>0))
+        throw std::invalid_argument("Imported/cone conversion needs valid type, epochs, and inner radius");
+    Result result; auto& c=result.cme;
+    c.fieldModel=in.cmeType;
+    const double fittedHeight=(in.cmeType==4 ? model->height : model->leadingHeight)*model->solarRadius/c_SR;
+    const auto transit=dbm(fittedHeight,in.targetHeight,in.speed,in.wind,in.gamma);
+    result.transitSeconds=transit.first;
+    result.epoch=advanceCalendarEpoch(model->fitEpoch,transit.first);
+    c.insertionTime=secondsBetweenEpochs(start,result.epoch); c.referenceTime=c.insertionTime;
+    if(c.insertionTime<0 && !c.usesFiniteCloud()) throw std::invalid_argument("Derived CME reference epoch precedes BC_start_time");
+    c.enterTime=result.epoch.decimalYear(); c.apex_speed=transit.second;
+    c.dragGamma=in.gamma; c.windSpeed=in.wind; c.r1=in.targetHeight; c.r0=0;
+    c.importedScale=in.targetHeight*c_SR/(model->leadingHeight*model->solarRadius);
+    c.plasmaReferenceHeight=innerRsun;
+    const double offset=earthLongitude(in.earthTrajectory,model->fitEpoch)+181.02;
+    c.lat=model->latitude; c.lon=std::fmod(std::fmod(model->longitude+offset,360.)+360.,360.);
+    c.tilt=model->tilt; c.halfangle=model->alpha*180/pi;
+    c.helicity_sign=model->helicity;
+    model->setLongitudeOffset(offset);
+    result.poloidalFlux=result.fullPoloidalFlux=model->poloidalFlux;
+    result.toroidalFlux=model->toroidalFlux;
+    c.pol_flux_control=model->twist*au/(model->solarRadius*c.importedScale);
+    c.imported=std::move(model);
+    if(c.usesFiniteCloud()) {
+        CMEModel::prepareConeCloud(c,innerRsun);
+        result.epoch=advanceCalendarEpoch(start,c.referenceTime);
+        result.transitSeconds=secondsBetweenEpochs(c.imported->fitEpoch,result.epoch);
+        c.enterTime=result.epoch.decimalYear();
+    }
+    return result;
+}
 } // namespace GCS
 
 // ------------------------- Shared source physics -------------------------
@@ -850,13 +904,24 @@ inline Result convert(const Input &in, CalendarEpoch start, double innerRsun) {
 namespace CMEModel {
 using Vector = std::array<double, 3>;
 // Cartesian field [G], velocity [cm/s] and added source density [g/cm^3].
-// sample() sets the minimum density; loadDensity() increases it when needed.
+// Rope samples carry added plasma. Cone samples carry a target total plasma
+// state, blended with the background by plasmaWeight at the inner boundary.
 struct Sample {
     Vector field{}, velocity{};
     double density = 0;
+    double temperature = 0;
+    bool magnetized = true;
+    bool prescribedPlasma = false;
+    double plasmaWeight = 1;
 };
 
-// The same initialization rule is used for every CME. Allow vA up to four
+inline double totalDensity(const std::array<double,8>& ambient, const Sample& source) {
+    return source.prescribedPlasma
+        ? (1-source.plasmaWeight)*ambient[0]+source.plasmaWeight*source.density
+        : ambient[0]+source.density;
+}
+
+// For magnetic ropes, allow vA up to four
 // times the local driver speed to limit added mass. This numerical loading
 // threshold is not a measured mass or an empirical law.
 // It is deliberately not a per-CME input knob. Evolved interior density is
@@ -877,6 +942,7 @@ inline double loadedDensity(double minimumAddedDensity, double ambientDensity,
 // The volume driver is purely radial. The boundary driver passes its radial
 // speed explicitly, retaining the ambient transverse velocity.
 inline void loadDensity(Sample &source, const std::array<double, 8> &ambient, double radialSpeed) {
+    if(!source.magnetized) return; // Cone total density is prescribed, without magnetic loading.
     double totalFieldSquared = 0;
     for (int d = 0; d < 3; ++d) {
         const double field = ambient[5 + d] + source.field[d];
@@ -892,14 +958,21 @@ inline void loadDensity(Sample &source, const std::array<double, 8> &ambient) {
     loadDensity(source, ambient, std::sqrt(speedSquared));
 }
 
-// Each CME fades independently from full boundary forcing at insertion to
-// zero at boundaryTaperTime. The quintic has zero first and second derivatives
-// at both ends. Physical time alone determines the weight, including on restart.
+// Types 1-3 and 5 retain full boundary forcing for the first half of the total
+// boundaryTaperTime, then fade to zero over the second half. The quintic joins
+// the plateau and zero with zero first/second derivatives. This is an elapsed-
+// time prescription, not a geometric midpoint of the rope, including on restart.
 inline double boundaryTaperWeight(const CMEParameters &source, double time) {
+    // Type 4 has an unattenuated, finite geometric passage. Volume insertion
+    // can feed only the remaining part of a cloud still crossing the boundary.
+    if(source.usesFiniteCloud()) return time>=source.insertionTime && time<source.cloudEndTime ? 1. : 0.;
     const double age = time - source.insertionTime;
     if (age < 0 || age >= source.boundaryTaperTime)
         return 0;
-    const double remaining = 1 - age / source.boundaryTaperTime;
+    const double phase = age / source.boundaryTaperTime;
+    if (phase <= .5)
+        return 1;
+    const double remaining = 2 * (1 - phase);
     return remaining * remaining * remaining * (10 + remaining * (-15 + 6 * remaining));
 }
 
@@ -908,7 +981,8 @@ inline double boundaryTaperWeight(const CMEParameters &source, double time) {
 // continuously to zero instead of imposing a residual loading floor on WSA.
 inline void taperBoundarySource(Sample &source, const std::array<double, 8> &ambient,
                                  double weight) {
-    source.density *= weight;
+    if(source.prescribedPlasma) source.plasmaWeight *= weight;
+    else source.density *= weight;
     for (int d = 0; d < 3; ++d) {
         source.field[d] *= weight;
         source.velocity[d] = ambient[1 + d] + weight * (source.velocity[d] - ambient[1 + d]);
@@ -922,6 +996,32 @@ inline bool sample(const CMEParameters &c, const Vector &position, Sample &resul
     const double scale = c.geometryScale;
     if (!(scale > 0))
         return false;
+    if(c.imported) {
+        result={};
+        Vector query=position;
+        if(c.usesFiniteCloud()) for(int d=0;d<3;++d) query[d]-=c.cloudShift*c.cloudAxis[d];
+        if(c.fieldModel==4) {
+            if(ImportedCME::norm(query)>c.cloudSphereRadius) return false;
+        } else if(!c.imported->sample(query,c.importedScale*scale,result.field)) return false;
+        result.magnetized=c.imported->magnetic;
+        result.temperature=c.temperature;
+        result.density=c.density/(scale*scale*scale);
+        if(c.isCone()) {
+            result.prescribedPlasma=true;
+            const double radius=ImportedCME::norm(position)/c_SR;
+            if(!(radius>0)) return false;
+            if(c.usesFiniteCloud()) {
+                result.density=c.density;
+                for(int d=0;d<3;++d) result.velocity[d]=c.cloudSpeed*1e5*position[d]/(c_SR*radius);
+                return true;
+            }
+            const double ratio=c.plasmaReferenceHeight/radius,dilution=ratio*ratio*ratio;
+            result.density=c.density*dilution;
+            result.temperature=c.temperature*std::pow(dilution,c.plasmaGamma-1);
+        }
+        for(int d=0;d<3;++d) result.velocity[d]=c.apex_speed*1e5*position[d]/(c_SR*(c.r1+c.r0)*scale);
+        return true;
+    }
     const double lat = -c.lat * CTFRNormal::pi / 180, lon = c.lon * CTFRNormal::pi / 180;
     const double tilt = c.tilt * CTFRNormal::pi / 180;
     const double cl = std::cos(lat), sl = std::sin(lat), co = std::cos(lon), so = std::sin(lon);
@@ -957,6 +1057,7 @@ inline bool sample(const CMEParameters &c, const Vector &position, Sample &resul
         result.velocity[i] = c.apex_speed * 1e5 * position[i] / (c_SR * (c.r1 + c.r0) * scale);
     }
     result.density = c.density / (scale * scale * scale);
+    result.temperature = c.temperature;
     return true;
 }
 
@@ -1007,16 +1108,56 @@ inline double boundaryStartTime(const CMEParameters &source, double innerRsun) {
     return source.referenceTime + .5 * (lower + upper);
 }
 
+// Type 4: an ENLIL-style finite spherical cloud. Its maximum boundary
+// footprint has sin(alpha)=a/r_inner. The center crosses from r_inner-a
+// to r_inner+a at the boundary-entry speed; the inlet carries uniform n,T,V.
+// Type 5 retains its imported, homologously expanding shape and taper.
+inline void prepareConeCloud(CMEParameters& source,double innerRsun) {
+    const double entry=boundaryStartTime(source,innerRsun);
+    double height,speed;
+    if(!trajectory(source,entry-source.referenceTime,height,speed))
+        throw std::invalid_argument("Cannot propagate cone to its first boundary contact");
+    const auto& model=*source.imported;
+    const double inner=innerRsun*c_SR;
+    source.cloudEntryTime=entry;
+    source.cloudSpeed=speed;
+    source.cloudAxis=ImportedCME::product(model.rotation,Vector{0,0,1});
+    source.cloudSphereRadius=inner*std::sin(model.alpha);
+    source.cloudEntryShift=inner-source.cloudSphereRadius;
+    source.cloudReferenceShift=(source.r1+source.r0)*c_SR-source.cloudSphereRadius;
+    source.cloudEndTime=entry+2*source.cloudSphereRadius/(speed*1e5);
+    source.referenceTime=entry+(source.cloudReferenceShift-source.cloudEntryShift)/(speed*1e5);
+    source.insertionTime=source.referenceTime;
+    source.cloudShift=source.cloudReferenceShift;
+    source.apex_speed=speed;
+    source.importedScale=1;
+}
+
 inline bool expandedSource(const CMEParameters &source, double time, CMEParameters &current) {
     if (time < source.insertionTime)
         return false;
     current = source;
+    if(source.usesFiniteCloud()) {
+        current.cloudShift=source.cloudEntryShift+source.cloudSpeed*1e5*(time-source.cloudEntryTime);
+        return true;
+    }
     double height, speed;
     if (!trajectory(source, time - source.referenceTime, height, speed))
         return false;
     current.geometryScale = height / (source.r1 + source.r0);
     current.apex_speed = speed;
     return current.geometryScale > 0;
+}
+
+// Smallest total cone density that can be imposed at the boundary right now.
+// Its use in the CFL scan bounds ambient Alfven speeds when a cone replaces
+// denser background plasma without changing the background magnetic field.
+inline double minimumConeBoundaryDensity(const std::vector<CMEParameters>& sources, double time) {
+    double density=0;
+    for(const auto& source:sources)
+        if(source.isCone() && boundaryTaperWeight(source,time)>0)
+            density=density>0 ? std::min(density,source.density) : source.density;
+    return density;
 }
 
 // A new boundary field can be stronger than every owned cell. Include its
@@ -1030,26 +1171,39 @@ inline double boundaryCFLRate(double interiorRate, const std::vector<CMEParamete
     double rate = interiorRate;
     for (const auto &source : sources) {
         const double weight = boundaryTaperWeight(source, time);
-        if (source.injectionMethod != 1 || weight <= 0) continue;
+        if ((!source.usesFiniteCloud() && source.injectionMethod != 1) || weight <= 0) continue;
         CMEParameters current;
         if (!expandedSource(source, time, current)) continue;
         const double height = c_SR * (current.r1 + current.r0) * current.geometryScale;
-        const double speed = current.apex_speed * 1e5 * innerRadius / height;
+        const double speed = source.usesFiniteCloud() ? source.cloudSpeed*1e5 : current.apex_speed * 1e5 * innerRadius / height;
+        if(source.usesFiniteCloud()) {
+            rate+=(speed+std::sqrt(gamma*2*1.380649e-16*source.temperature/c_MP))/crossingWidth;
+            continue;
+        }
         const double rootWeight = std::sqrt(weight);
         const double thermal = std::sqrt(.5 * gamma * source.plasmaBeta);
         rate = rate * (1 + thermal * rootWeight) + speed / crossingWidth *
             (weight + rootWeight * (1 + thermal) / minimumAlfvenMach);
+        if(source.temperature>0)
+            rate+=rootWeight*std::sqrt(gamma*2*1.380649e-16*source.temperature/c_MP)/crossingWidth;
     }
     return rate;
 }
 
-// Gas pressure after adding source mass at the ambient temperature.
+// Cone total pressure is prescribed; magnetic ropes add plasma pressure and
+// optional beta heating to the background. T denotes equal proton/electron T.
 inline double thermalPressure(const std::array<double, 8> &ambient, const Sample &source,
                               double beta) {
+    if(source.prescribedPlasma) {
+        const double target=2*1.380649e-16*source.temperature*source.density/c_MP;
+        return (1-source.plasmaWeight)*std::max(0.,ambient[4])+source.plasmaWeight*target;
+    }
     double sourceMagneticPressure = 0;
     for (double field : source.field)
         sourceMagneticPressure += field * field / (8 * CTFRNormal::pi);
-    return std::max(0., ambient[4]) * (ambient[0] + source.density) / ambient[0] +
+    const double addedPressure=source.temperature>0 ? 2*1.380649e-16*source.temperature*source.density/c_MP
+        : std::max(0.,ambient[4])*source.density/ambient[0];
+    return std::max(0., ambient[4]) + addedPressure +
            beta * sourceMagneticPressure;
 }
 
@@ -1061,9 +1215,11 @@ inline double thermalPressure(const std::array<double, 8> &ambient, const Sample
 inline std::array<double, 8> increment(const std::array<double, 8> &old, const Sample &cme,
                                        double gamma, double beta) {
     std::array<double, 8> delta{};
-    const double density = old[0] + cme.density;
+    if(cme.prescribedPlasma && cme.plasmaWeight==0) return delta;
+    const double density = totalDensity(old,cme);
     double oldKinetic = 0, newKinetic = 0, oldMagnetic = 0, newMagnetic = 0, cmeMagnetic = 0;
-    delta[0] = cme.density;
+    delta[0] = density-old[0];
+    if(!cme.prescribedPlasma) delta[0]=cme.density; // Preserve rope rounding and loading diagnostics.
     for (int d = 0; d < 3; ++d) {
         delta[1 + d] = density * cme.velocity[d] - old[0] * old[1 + d];
         delta[5 + d] = cme.field[d];
@@ -1074,7 +1230,9 @@ inline std::array<double, 8> increment(const std::array<double, 8> &old, const S
             (old[5 + d] + cme.field[d]) * (old[5 + d] + cme.field[d]) / (8 * CTFRNormal::pi);
         cmeMagnetic += cme.field[d] * cme.field[d] / (8 * CTFRNormal::pi);
     }
-    const double addedPressure = std::max(0., old[4]) * cme.density / old[0] + beta * cmeMagnetic;
+    const double addedPressure = cme.prescribedPlasma ? thermalPressure(old,cme,beta)-std::max(0.,old[4])
+        : (cme.temperature>0 ? 2*1.380649e-16*cme.temperature*cme.density/c_MP
+        : std::max(0., old[4]) * cme.density / old[0]) + beta * cmeMagnetic;
     delta[4] = addedPressure / (gamma - 1) + newKinetic - oldKinetic + newMagnetic - oldMagnetic;
     return delta;
 }
@@ -1091,8 +1249,9 @@ class CMEInsertionSchedule {
     explicit CMEInsertionSchedule(const std::vector<CMEParameters> &sources) {
         for (const auto &source : sources) {
             m_times.push_back(source.insertionTime);
-            m_boundary.push_back(source.injectionMethod == 1);
-            m_feedingEnd.push_back(source.insertionTime + source.boundaryTaperTime);
+            m_boundary.push_back(source.injectionMethod == 1 || (source.usesFiniteCloud() && source.cloudEndTime>source.insertionTime));
+            m_feedingEnd.push_back(source.usesFiniteCloud() ? std::max(source.insertionTime,source.cloudEndTime)
+                : source.insertionTime + source.boundaryTaperTime);
         }
         if (!std::is_sorted(m_times.begin(), m_times.end()))
             throw std::invalid_argument("CME sources must be ordered by insertion time");

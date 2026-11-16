@@ -576,12 +576,14 @@ public:
    inline static T dtCFL(
                          MBLevelBoxData<T,NUMCOMPS,MEM>& a_JU,
                          MBInterpOp& a_iop,
-                         MBLevelBoxData<T,1,MEM>& a_dVolr);
+                         MBLevelBoxData<T,1,MEM>& a_dVolr,
+                         T coneBoundaryDensity=0);
 
   inline static T dtCFLSecondOrderHost(
       const MBLevelBoxData<T,NUMCOMPS,MEM>& state,
       const MBLevelBoxData<T,1,MEM>& volume,
-      const MBLevelBoxData<T,1,MEM>* mappedScale=nullptr);
+      const MBLevelBoxData<T,1,MEM>* mappedScale=nullptr,
+      T coneBoundaryDensity=0);
   
   inline BoxData<T,1,MEM> kineticEnergyW(
                                          const State& a_WPoint,

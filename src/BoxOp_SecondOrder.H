@@ -175,7 +175,7 @@ inline void BoxOp_EulerCubedSphere<T,MAP,MEM>::secondOrderOperator(
     std::vector<CMEParameters> emerging;
     if (cartesianPrimitives && rhs.box().low()[0]==0)
         for (const auto& source:ParseInputs::get_CMEs())
-            if (source.injectionMethod==1 && CMEModel::boundaryTaperWeight(source,this->time())>0) {
+            if ((source.injectionMethod==1 || source.usesFiniteCloud()) && CMEModel::boundaryTaperWeight(source,this->time())>0) {
                 CMEParameters current;
                 if(CMEModel::expandedSource(source,this->time(),current)) emerging.push_back(current);
             }

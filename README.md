@@ -20,7 +20,8 @@ The `CubedSphere` branch includes both uniform-grid and AMR solvers:
 - Multilevel AMR with conservative prolongation, restriction and refluxing;
   separate radial and angular refinement ratios; optional time subcycling.
 - File-driven or analytic solar wind, solar gravity, scheduled FRiED CME insertion,
-  trajectory probes, slices, and mapped HDF5 output.
+  trajectory probes, slices, and mapped HDF5 output. CME sources include FRiED,
+  GCS, exported deformed GCS, cone, and exported deformed cone volumes.
 
 For high-order refinement background, see
 [McCorquodale and Colella (2011)](https://doi.org/10.2140/camcos.2011.6.1),
@@ -104,8 +105,203 @@ Uncomment `restart_file` only when the matching checkpoint set is available.
 With `init_condition_type=0`,
 set `BC_file` to a compatible boundary HDF5 file. The repository includes one
 example in `scripts/` and a [SWiG conversion script](scripts/SWiG_to_HelioCubed_h5_conversion.py).
-`BC_start_time` and `CME_Enter_Time` accept decimal years or
-`DD-MM-YYYYTHH:MM:SS` in UTC.
+Use UTC dates in **`YYYY-MM-DDTHH:MM:SSZ`** format for `BC_start_time`,
+`GCS_fit_time`, and `CME_fit_time`, matching the JSON export's `epoch_utc`.
+For example, `2024-03-17T12:00:00Z` means 17 March 2024 at 12:00 UTC.
+Input dates also accept fractional seconds or an omitted `Z` (still UTC).
+Decimal years and existing day-first input dates remain supported. JSON exports
+require the year-first format with `Z`. CME insertion times are calculated from
+the fit epoch and propagation settings; calendar times in reports also use `Z`.
+
+## CME shapes and insertion
+
+Set `num_CMEs` and supply indexed `CME0.*`, `CME1.*`, ... blocks. Sources are
+sorted by start time. Existing FRiED/GCS input blocks remain supported.
+
+| `CME_type` | Shape and magnetic prescription | Required model inputs |
+| --- | --- | --- |
+| 0 | Disabled | None |
+| 1 | FRiED | Existing `GCS_*` and flux inputs |
+| 2 | GCS with smooth joins | Existing `GCS_*` and flux inputs |
+| 3 | Deformed GCS from dGCS | `CME_shape_file`, `CME_magnetic_file`, `CME_speed` |
+| 4 | Finite spherical cone cloud | `Cone_height`, `Cone_half_angle`, `Cone_latitude`, `Cone_longitude`, `CME_fit_time`, `CME_speed` |
+| 5 | Expanding deformed cone from dGCS | `CME_shape_file`, `CME_speed` |
+
+Use `CME_injection_method volume` for insertion into owned cells, followed by
+optional inner-boundary feeding. Use `surface` (or its alias `boundary`) to
+introduce the source through the inner spherical boundary. Types 1–3 and 5
+expand with a boundary taper; type 4 passes through as a finite spherical cloud.
+Surface insertion and boundary feeding use the standard second-order operator
+(`spatial_order=2`, `spatial_operator=1`), on uniform grids or AMR. Fourth-order
+volume insertion is supported; its boundary feeding is inactive.
+
+For **deformed GCS**, export **both** shapes and magnetic fields in dGCS and
+select the two JSON files from the same member folder:
+
+```text
+-num_CMEs                       1
+-CME0.CME_type                  3
+-CME0.CME_shape_file            /path/to/member_0000/shape.json
+-CME0.CME_magnetic_file         /path/to/member_0000/magnetic_field.json
+-CME0.CME_speed                 900
+-CME0.CME_injection_method      surface
+-CME0.DBM_target_height         70
+-CME0.DBM_gamma                 1e-8
+-CME0.DBM_wind_speed            450
+-CME0.CME_density               1.38e-23
+-CME0.CME_earth_trajectory      trajEarth.dat
+```
+
+These files define the complete continuous volume and field, including the
+Bernstein coefficients, front/legs winding ratio, flux magnitudes, handedness
+and axial polarity. The C++ reader independently recomputes the whole-box
+invertibility certificate, inverts the volume map at each requested point, and
+evaluates the analytic Piola field. Shape/field references, coefficients,
+rotation, epoch and units must agree. Both uniform and front-weighted magnetic
+exports are supported, including zero poloidal flux. The NPZ, VTK and sampled
+field-line files are not needed by the solver. Do not supply separate flux or
+magnetic-sign overrides for an imported source.
+
+The exported **whole-rope** magnetic fluxes are preserved; they are not converted
+to the computational-domain clipped poloidal-flux convention of types 1/2.
+Classic GCS cone/front joins from the export are retained, including tangential
+field jumps; the importer does not substitute HelioCubed's smoothed GCS model.
+
+For a **parameter-only cone**, replace that entire CME block with, for example:
+
+```text
+-num_CMEs                       1
+-CME0.CME_type                  4
+-CME0.Cone_height               15
+-CME0.Cone_half_angle           35
+-CME0.Cone_latitude             0
+-CME0.Cone_longitude            0
+-CME0.CME_fit_time              2024-03-17T12:00:00Z
+-CME0.CME_speed                 900
+-CME0.CME_injection_method      surface
+-CME0.DBM_target_height         70
+-CME0.DBM_gamma                 1e-8
+-CME0.DBM_wind_speed            450
+-CME0.Cone_reference_density    200
+-CME0.Cone_reference_temperature 1.5e6
+-CME0.Cone_density_factor       4
+-CME0.Cone_temperature_factor   1
+-CME0.CME_plasma_beta           0
+-CME0.CME_earth_trajectory      trajEarth.dat
+```
+
+The type-4 fit parameters define an ENLIL-style **spherical plasma cloud**.
+`Cone_height` is the fitted nose height in nominal solar radii (695700 km).
+`Cone_half_angle` is the maximum angular half-width of the footprint on the
+inner boundary; latitude/longitude are Stonyhurst degrees. With inner radius
+`R`, the cloud radius is `a=R*sin(half_angle)`. Its center moves along the cone
+axis from `R-a` at first contact to `R+a` at final clearance. The resulting
+passage lasts `2*a/V_cloud`, with the prescribed uniform radial cloud speed.
+This follows the finite homogeneous-cloud boundary approach described by
+[Mays et al. (2015), Section 2](https://arxiv.org/pdf/1504.04402#page=3),
+using HelioCubed's MHD and boundary solver rather than ENLIL's Fortran code.
+
+For a **deformed cone**, use type 5 with its exported `shape.json`, `CME_speed`,
+the chosen insertion method, and the same plasma/DBM/trajectory options above.
+Also set `CME_boundary_taper_time` for its smooth boundary fade (default 43200 s).
+Its fit epoch and complete geometry come from the export. The fitted/deformed
+lemniscate remains rooted and expands homologously with the DBM leading radius.
+It retains its exported shape and the existing taper prescription. Do not supply
+a magnetic file.
+Because type 4 uses a spherical-cloud assumption and type 5 retains the full
+export, even an undeformed exported lemniscate has different geometry from type 4.
+
+For types 3–5, the fitted speed is the **leading-radius speed** in km/s. The importer
+numerically refines the fitted maximum surface radius, converts the export's
+`solar_radius_cm` to physical cm, and propagates that radius with the DBM to
+`DBM_target_height` for types 3 and 5 (in the solver's 696000-km solar radii).
+For type 4, the fitted radius is the specified nose height; DBM determines the
+first boundary arrival time and entry speed, then the finite spherical template
+translates at that constant speed. Its volume snapshot has its nose at
+`DBM_target_height`. This initializes a homogeneous cloud rather than an
+ENLIL-evolved state at that radius. The target must be at least the fitted leading radius.
+Stonyhurst orientation is converted at the
+fit/export epoch using the Earth trajectory, as for the existing GCS driver.
+Use an early enough `BC_start_time` to include the entire surface emergence.
+
+Types 1–3 and 5 use the existing homologous DBM source evolution:
+positions scale with the leading radius, radial velocity is `V_lead*r/H`, and
+an imported magnetic field scales as expansion factor to the power −2.
+The [input templates](exec/inputs_SW) share only the DBM settings below the
+global source count; each model block includes its own type, geometry,
+insertion, plasma settings, and taper where applicable.
+
+For magnetic models 1–3, `CME_density` is the minimum **added** density at the
+reference insertion size. The analytic source density scales as expansion
+factor to the power −3. Boundary feeding uses the supplied density. Set
+`CME_temperature` in K for the added material; zero/omitted retains the local
+ambient temperature. For positive temperature, `p_added=2*rho_added*kB*T/mp`.
+`CME_plasma_beta` adds pressure relative to the intrinsic CME magnetic pressure.
+
+For cone models 4/5, the ENLIL-style prescription sets the **total** cloud state
+at the physical inner boundary:
+
+```text
+n_cloud = Cone_reference_density * Cone_density_factor
+T_cloud = Cone_reference_temperature * Cone_temperature_factor
+rho_cloud = mp * n_cloud
+p_cloud = 2 * n_cloud * kB * T_cloud
+```
+
+Defaults are a reference proton density of **200 cm⁻³**, temperature of
+**1.5 million K**, density factor **4**, and temperature factor **1**. Thus the
+full-strength inlet has total `n=800 cm^-3`, `T=1.5e6 K`, and
+`rho=1.3381e-21 g/cm^3`. Pressure assumes fully ionized hydrogen with equal
+electron and proton temperatures. These reference values correspond to the
+documented `a8b1` configuration in the
+[NASA/NOAA ENLIL validation report, Table 3](https://ccmc.gsfc.nasa.gov/static/files/CCMC_SWPC_annex_final_report.pdf#page=6);
+the cloud factors follow the prescription in
+[Mays et al. (2015)](https://arxiv.org/pdf/1504.04402#page=4).
+They are calibrated boundary values, and the input permits changing all four.
+
+The cone state replaces the background plasma inside its mask, including when
+the target density or pressure is smaller; it does not add another cloud
+density on top. Ambient B is retained without an Alfvén density-loading floor.
+The rope inputs `CME_density` and `CME_temperature` are rejected for cones;
+`CME_plasma_beta` must be zero because there is no intrinsic CME magnetic field.
+Type 4 carries the specified uniform total density, temperature and radial
+speed while its sphere covers a boundary patch, and background values otherwise.
+Type 5 holds its boundary forcing at full strength for the first half of the
+configured duration, then blends total density and pressure back to the
+background with a quintic taper; its excess velocity fades with the same weight.
+Ambient B is retained throughout.
+
+For **type-4 volume insertion**, cells inside the translated sphere snapshot
+receive the same homogeneous plasma prescription. Any part still crossing the
+inner boundary is fed only until its trailing edge clears. This partial-cloud
+volume insertion requires the standard second-order operator; fourth-order
+volume insertion requires a placement after the sphere clears the boundary.
+Once inserted, the plasma evolves under MHD rather than remaining rigid or
+being forced to retain the template shape.
+For **type-5 volume insertion**, the exported volume is scaled to the reference
+leading height. The radial initialization profiles are
+`n=n_boundary*(r_inner/r)^3` and
+`T=T_boundary*(r_inner/r)^(3*(gamma-1))`, with homologous velocity `V_lead*r/H`.
+These are expanding-source approximations, rather than ENLIL's uniform sphere.
+Both cone models prescribe conservative cell states at both evolution
+orders, avoiding negative pressure from high-order averaging across the sharp
+shape boundary. A fourth-order run retains its fourth-order evolution scheme.
+
+For types 1–3 and 5, `CME_boundary_taper_time` (default 43200 s) is the **total**
+boundary-forcing duration measured from insertion/emergence start. For its first
+half the taper weight is exactly 1. During its second half the weight falls
+smoothly to zero with zero first and second derivatives at both ends of the
+fade. Thus 43200 s gives 6 hours at full strength followed by a 6-hour fade.
+The timing uses elapsed injection time; it does not measure a geometric halfway
+point of the rope. This weight multiplies added mass, CME field and velocity
+perturbations for magnetic ropes, or blends total plasma states for type 5.
+Zero disables volume boundary feeding; surface insertion requires a
+positive duration. Only type 4 rejects this input: its passage is set by the
+finite sphere's geometry and speed, including on restart.
+
+`CME_resolved.inputs` and `CME_conversion_report.txt` record the resolved
+schedule, scaling and model details. Restart with the same source files and
+source ordering; the saved insertion count prevents duplicate volume insertion.
 
 ## Adaptive mesh refinement
 

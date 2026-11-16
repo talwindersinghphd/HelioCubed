@@ -350,10 +350,12 @@ PreStagePatch(BoxData<T,NUMCOMPS,MEM>& a_USphStage,
           CMEModel::Sample faceSample;
           if(!CMEModel::sample(current,{position[0]*innerRadius/radius,
               position[1]*innerRadius/radius,position[2]*innerRadius/radius},faceSample)) continue;
-          if(!CMEModel::sample(current,position,cme)) continue;
+          if(source.usesFiniteCloud()) cme=faceSample; // The inlet is defined on the physical face, not at a ghost center.
+          else if(!CMEModel::sample(current,position,cme)) continue;
           // Load the full boundary source first. Its mass, field and excess
           // velocity are faded together below, leaving exactly WSA at expiry.
           cme.density=source.density;
+          if(cme.prescribedPlasma) cme.temperature=source.temperature;
           std::array<double,8> old{};old[0]=a_USphStage(p,iRHO);
           double ke=0,me=0,radialOld=0,radialCME=0;
           for(int d=0;d<3;++d) {
@@ -369,7 +371,7 @@ PreStagePatch(BoxData<T,NUMCOMPS,MEM>& a_USphStage,
           // uses its actual homologous speed; the face characteristic boundary
           // handles waves leaving through a sub-fast patch.
           for(int d=0;d<3;++d)
-            cme.velocity[d]=source.injectionMethod==1 ? radialCME*position[d]/radius
+            cme.velocity[d]=(source.injectionMethod==1 || source.usesFiniteCloud()) ? radialCME*position[d]/radius
                 : old[1+d]+std::max(0.,radialCME-radialOld)*position[d]/radius;
           CMEModel::loadDensity(cme, old, source.injectionMethod==1
               ? radialCME : std::max(radialOld,radialCME));
@@ -382,7 +384,7 @@ PreStagePatch(BoxData<T,NUMCOMPS,MEM>& a_USphStage,
           for(int d=0;d<3;++d) {
             const double b=old[5+d]+cme.field[d];b2+=b*b;bn+=b*position[d]/radius;
           }
-          const double rho=old[0]+cme.density;
+          const double rho=CMEModel::totalDensity(old,cme);
           const double pressure=CMEModel::thermalPressure(old,cme,source.plasmaBeta);
           const double cs2=m_gamma*pressure/rho,va2=b2/(4*M_PI*rho),van2=bn*bn/(4*M_PI*rho);
           const double fast2=.5*(cs2+va2+std::sqrt(std::max(0.,(cs2+va2)*(cs2+va2)-4*cs2*van2)));

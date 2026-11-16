@@ -100,7 +100,8 @@ template<typename T, typename MAP, MemType MEM>
 inline T BoxOp_EulerCubedSphere<T,MAP,MEM>::dtCFLSecondOrderHost(
     const MBLevelBoxData<T,NUMCOMPS,MEM>& state,
     const MBLevelBoxData<T,1,MEM>& suppliedVolume,
-    const MBLevelBoxData<T,1,MEM>* mappedScale)
+    const MBLevelBoxData<T,1,MEM>* mappedScale,
+    T coneBoundaryDensity)
 {
     static_assert(MEM == HOST && DIM == 3 && NUMCOMPS == 8);
     PR_TIMERS("HelioCubed::dtCFLSecondOrderHost");
@@ -192,7 +193,11 @@ inline T BoxOp_EulerCubedSphere<T,MAP,MEM>::dtCFLSecondOrderHost(
                     }
                     const T width=d==0 ? r.width
                         : r.volume*a.det[d]*patch.h/r.area[d]/a.normal[d];
-                    const T wave=std::sqrt(gamma*pressure/rho+fullB2/4.0/M_PI/rho);
+                    // A cone can prescribe a smaller total density while
+                    // retaining ambient B. Bound the corresponding Alfven
+                    // speed before that state reaches any owned cell.
+                    const T magneticDensity=coneBoundaryDensity>0 ? std::min(rho,coneBoundaryDensity) : rho;
+                    const T wave=std::sqrt(gamma*pressure/rho+fullB2/4.0/M_PI/magneticDensity);
                     inverseDt+=(wave+std::sqrt(v2))/width;
                 }
                 localMaximum=std::max(localMaximum,inverseDt);
